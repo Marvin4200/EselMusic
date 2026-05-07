@@ -21,7 +21,19 @@ const AUTOPLAY_RETRY_MS = 15_000;
 const DEUTSCHRAP_HINT = 'deutschrap';
 const DEUTSCHRAP_KEYWORDS = [
     'deutschrap', 'deutsch rap', 'german rap', 'german hip hop', 'hip hop deutsch',
-    'haftbefehl', 'bonez', '187', 'capital bra', 'samra', 'luciano', 'ufo361', 'apache', 'pashanim',
+    // Labels & crews
+    '187', 'aggro berlin', 'urban', 'urban recordings',
+    // Artists — well-known Deutschrap acts
+    'haftbefehl', 'bonez mc', 'raf camora', 'capital bra', 'samra', 'luciano',
+    'ufo361', 'apache 207', 'pashanim', 'loredana', 'nimo', 'animus', 'xatar',
+    'mero', 'ali as', 'bushido', 'farid bang', 'kollegah', 'sido', 'kool savas',
+    'mach one', 'samy deluxe', 'fler', 'eko fresh', 'taktloss', 'ssio', 'az izz',
+    'gzuz', 'maxwell', 'nate57', 'kalim', 'morad', 'bausa', 'badmomzjay',
+    'zuna', 'manuellsen', 'yung hurn', 'k.i.z', 'kiz', 'tarek', 'ottah',
+    'hashinshin', 'capo', 'veysel', 'cro', 'punch arabus', 'sun diego',
+    // Slang / scene terms that appear in titles
+    'deutschrap', 'diggah', 'ehrenmann', 'ghetto', 'strasse', 'straße',
+    'berlin', 'wien', 'zürich', 'hamburg', 'köln', 'frankfurt', 'stuttgart',
 ];
 
 function startPanelRefresh(guildId) {
@@ -89,8 +101,9 @@ async function getRelatedTrackFor247(guildId) {
                 const text = `${t?.info?.title || ''} ${t?.info?.author || ''}`.toLowerCase();
                 return DEUTSCHRAP_KEYWORDS.some(k => text.includes(k));
             });
-            const pool = deutschrapCandidates.length > 0 ? deutschrapCandidates : candidates;
-            const picked = pool.find(t => t?.info?.uri && t.info.uri !== last.track_uri) || pool[0];
+            // Strict: only pick from confirmed Deutschrap results.
+            if (deutschrapCandidates.length === 0) continue;
+            const picked = deutschrapCandidates.find(t => t?.info?.uri && t.info.uri !== last.track_uri) || deutschrapCandidates[0];
             if (picked) return { track: picked, seed: last };
         } catch {
             // Try next fallback query.
@@ -120,14 +133,13 @@ async function getFallbackDeutschrapTrackFor247() {
             const track = candidates.find((t) => {
                 const text = `${t?.info?.title || ''} ${t?.info?.author || ''}`.toLowerCase();
                 return DEUTSCHRAP_KEYWORDS.some(k => text.includes(k));
-            }) || candidates[0];
-
-            if (track) {
-                if (track.info) {
-                    track.info.author = track.info.author || 'Deutschrap AutoMix';
-                }
-                return track;
+            });
+            // Strict: skip this query if nothing matches Deutschrap.
+            if (!track) continue;
+            if (track.info) {
+                track.info.author = track.info.author || 'Deutschrap AutoMix';
             }
+            return track;
         } catch {
             // Try next fallback query.
         }
