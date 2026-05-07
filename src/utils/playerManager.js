@@ -73,7 +73,7 @@ async function playNext(guildId, { silent = false } = {}) {
 /**
  * Get or create a guild player. Reuses existing player if already connected.
  */
-async function createGuildPlayer({ guildId, voiceChannelId, textChannel, shoukaku }) {
+async function createGuildPlayer({ guildId, voiceChannelId, shardId, textChannel, shoukaku }) {
     const existing = players.get(guildId);
     if (existing) {
         existing.textChannel = textChannel;
@@ -83,6 +83,7 @@ async function createGuildPlayer({ guildId, voiceChannelId, textChannel, shoukak
     const player = await shoukaku.joinVoiceChannel({
         guildId,
         channelId: voiceChannelId,
+        shardId,
         deaf: true,
     });
 

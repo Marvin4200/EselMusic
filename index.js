@@ -31,6 +31,9 @@ const shoukaku = new Shoukaku(new Connectors.DiscordJS(client), lavalinkNodes, {
 shoukaku.on('error', (node, error) => {
     console.error(`[Shoukaku] Node "${node}" error:`, error.message);
 });
+shoukaku.on('debug', (name, info) => {
+    console.log(`[Shoukaku:${name}] ${info}`);
+});
 shoukaku.on('ready', (name) => console.log(`✅ Lavalink node "${name}" connected`));
 shoukaku.on('close', (name, code, reason) => {
     console.warn(`⚠️ Lavalink node "${name}" closed: ${code} ${reason}`);

@@ -30,6 +30,7 @@ module.exports = {
         const state = await createGuildPlayer({
             guildId: interaction.guildId,
             voiceChannelId: voiceChannel.id,
+            shardId: interaction.guild.shardId,
             textChannel: interaction.channel,
             shoukaku,
         });
