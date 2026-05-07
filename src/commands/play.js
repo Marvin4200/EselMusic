@@ -41,8 +41,19 @@ module.exports = {
             const node = shoukaku.getIdealNode();
             if (!node) throw new Error('No Lavalink node available. Is Lavalink running?');
             const isUrl = /^https?:\/\//i.test(query);
-            const identifier = isUrl ? query : `ytsearch:${query}`;
-            resolved = await node.rest.resolve(identifier);
+            if (isUrl) {
+                resolved = await node.rest.resolve(query);
+            } else {
+                // Fallback across search prefixes because different YouTube clients
+                // (WEB/WEB_REMIX/IOS/etc.) can behave differently for text search.
+                const identifiers = [`ytsearch:${query}`, `ytmsearch:${query}`];
+                for (const identifier of identifiers) {
+                    resolved = await node.rest.resolve(identifier);
+                    if (resolved && resolved.loadType !== 'empty' && resolved.loadType !== 'error') {
+                        break;
+                    }
+                }
+            }
         } catch (err) {
             console.error('[play] Resolve error:', err);
             return interaction.editReply({ embeds: [{ color: 0xED4245, description: `❌ Failed to fetch: \`${err.message}\`` }] });
