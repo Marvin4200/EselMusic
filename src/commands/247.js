@@ -1,5 +1,6 @@
 const { SlashCommandBuilder } = require('discord.js');
 const { players } = require('../utils/playerManager');
+const { setGuildSettings } = require('../utils/config');
 
 module.exports = {
     data: new SlashCommandBuilder()
@@ -17,6 +18,7 @@ module.exports = {
         }
 
         state.is247 = !state.is247;
+        setGuildSettings(interaction.guildId, { is247: state.is247 });
         const icon = state.is247 ? '🟢' : '🔴';
 
         return interaction.reply({

@@ -4,3 +4,4 @@ application.yml
 .pm2/
 logs/
 *.log
+data/
