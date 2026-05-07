@@ -25,7 +25,15 @@ module.exports = {
         }
 
         const level = interaction.options.getInteger('level');
-        await state.player.setVolume(level);
+        if (typeof state.player.setGlobalVolume === 'function') {
+            await state.player.setGlobalVolume(level);
+        } else if (typeof state.player.setVolume === 'function') {
+            await state.player.setVolume(level);
+        } else if (typeof state.player.update === 'function') {
+            await state.player.update({ volume: level });
+        } else {
+            throw new Error('Volume control is not supported by the current player implementation');
+        }
         state.volume = level;
 
         const emoji = level === 0 ? '🔇' : level < 50 ? '🔈' : level < 100 ? '🔉' : '🔊';
