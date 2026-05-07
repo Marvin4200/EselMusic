@@ -18,15 +18,51 @@ const refreshIntervals = new Map();
 const automixRetryTimeouts = new Map();
 /** @type {Map<string, string[]>} guildId → recently played URIs (last 25) */
 const recentlyPlayedUris = new Map();
+/** @type {Map<string, string[]>} guildId → recently played authors (last 10) */
+const recentlyPlayedAuthors = new Map();
 const RECENTLY_PLAYED_MAX = 25;
+const RECENTLY_PLAYED_AUTHORS_MAX = 10;
+/** Max times the same author may appear in the last 10 before being skipped */
+const MAX_AUTHOR_REPEATS = 2;
 
-function addRecentUri(guildId, uri) {
+// Diverse seed artists for AutoMix rotation — one picked at random when current artist is over-represented
+const AUTOMIX_SEED_ARTISTS = [
+    'Capital Bra', 'Bonez MC', 'Apache 207', 'Luciano', 'Samra', 'Ufo361',
+    'Pashanim', 'Bausa', 'Badmomzjay', 'Nimo', 'Gzuz', 'RAF Camora',
+    'Haftbefehl', 'Bushido', 'Kollegah', 'Farid Bang', 'Mero', 'Zuna',
+    'Yung Hurn', 'Sido', 'Cro', 'K.I.Z', 'SSio', 'Maxwell',
+];
+
+function addRecentUri(guildId, uri, author) {
     if (!uri) return;
-    const list = recentlyPlayedUris.get(guildId) || [];
-    if (list.includes(uri)) return;
-    list.push(uri);
-    if (list.length > RECENTLY_PLAYED_MAX) list.shift();
-    recentlyPlayedUris.set(guildId, list);
+    // Track URI
+    const uriList = recentlyPlayedUris.get(guildId) || [];
+    if (!uriList.includes(uri)) {
+        uriList.push(uri);
+        if (uriList.length > RECENTLY_PLAYED_MAX) uriList.shift();
+        recentlyPlayedUris.set(guildId, uriList);
+    }
+    // Track author
+    if (author) {
+        const authorList = recentlyPlayedAuthors.get(guildId) || [];
+        authorList.push(author.toLowerCase());
+        if (authorList.length > RECENTLY_PLAYED_AUTHORS_MAX) authorList.shift();
+        recentlyPlayedAuthors.set(guildId, authorList);
+    }
+}
+
+function getOverusedAuthors(guildId) {
+    const list = recentlyPlayedAuthors.get(guildId) || [];
+    const counts = {};
+    for (const a of list) counts[a] = (counts[a] || 0) + 1;
+    return new Set(Object.entries(counts).filter(([, n]) => n >= MAX_AUTHOR_REPEATS).map(([a]) => a));
+}
+
+function pickDiverseSeedArtist(guildId) {
+    const overused = getOverusedAuthors(guildId);
+    const available = AUTOMIX_SEED_ARTISTS.filter(a => !overused.has(a.toLowerCase()));
+    const pool = available.length > 0 ? available : AUTOMIX_SEED_ARTISTS;
+    return pool[Math.floor(Math.random() * pool.length)];
 }
 
 const AUTOPLAY_RETRY_MS = 15_000;
@@ -100,14 +136,25 @@ async function getRelatedTrackFor247(guildId) {
     const last = getLastPlayedSong(guildId);
     if (!last?.title) return null;
 
-    // Prefer mixes/related results based on the latest played song.
+    const overusedAuthors = getOverusedAuthors(guildId);
+    const lastAuthorOverused = last.author && overusedAuthors.has(last.author.toLowerCase());
+
+    // When the current artist is over-represented, inject a diverse seed as first query
+    const diverseSeed = pickDiverseSeedArtist(guildId);
     const base = `${last.title} ${last.author || ''}`.trim();
-    const identifiers = [
-        `ytmsearch:${base} ${DEUTSCHRAP_HINT} mix`,
-        `ytsearch:${base} ${DEUTSCHRAP_HINT} related`,
-        `ytsearch:${base} ${DEUTSCHRAP_HINT}`,
-        `ytmsearch:${DEUTSCHRAP_HINT} mix`,
-    ];
+    const identifiers = lastAuthorOverused
+        ? [
+            `ytmsearch:${diverseSeed} ${DEUTSCHRAP_HINT}`,
+            `ytmsearch:${base} ${DEUTSCHRAP_HINT} mix`,
+            `ytsearch:${base} ${DEUTSCHRAP_HINT} related`,
+            `ytmsearch:${DEUTSCHRAP_HINT} mix`,
+        ]
+        : [
+            `ytmsearch:${base} ${DEUTSCHRAP_HINT} mix`,
+            `ytsearch:${base} ${DEUTSCHRAP_HINT} related`,
+            `ytsearch:${base} ${DEUTSCHRAP_HINT}`,
+            `ytmsearch:${DEUTSCHRAP_HINT} mix`,
+        ];
 
     for (const identifier of identifiers) {
         try {
@@ -117,14 +164,17 @@ async function getRelatedTrackFor247(guildId) {
             }
 
             const candidates = resolved.data.slice(0, 15);
+            const seenUris = recentlyPlayedUris.get(guildId) || [];
             const deutschrapCandidates = candidates.filter((t) => {
                 const text = `${t?.info?.title || ''} ${t?.info?.author || ''}`.toLowerCase();
                 return DEUTSCHRAP_KEYWORDS.some(k => text.includes(k));
             });
             // Strict: only pick from confirmed Deutschrap results.
             if (deutschrapCandidates.length === 0) continue;
-            const seenUris = recentlyPlayedUris.get(guildId) || [];
-            const picked = deutschrapCandidates.find(t => t?.info?.uri && !seenUris.includes(t.info.uri))
+            // Prefer tracks from artists not over-represented and not seen recently
+            const picked =
+                deutschrapCandidates.find(t => t?.info?.uri && !seenUris.includes(t.info.uri) && !overusedAuthors.has((t.info.author || '').toLowerCase()))
+                ?? deutschrapCandidates.find(t => t?.info?.uri && !seenUris.includes(t.info.uri))
                 ?? deutschrapCandidates.find(t => t?.info?.uri && t.info.uri !== last.track_uri)
                 ?? null;
             if (picked) return { track: picked, seed: last };
@@ -332,7 +382,7 @@ async function playNext(guildId, { silent = false } = {}) {
         clearAutomixRetry(guildId);
         await state.player.playTrack({ track: { encoded: next.encoded } });
         recordPlay(guildId, next.info);
-        addRecentUri(guildId, next.info?.uri);
+        addRecentUri(guildId, next.info?.uri, next.info?.author);
         startPanelRefresh(guildId);
         if (_client) updateMusicPanel(_client, guildId, state).catch(() => { });
         if (!silent) {
@@ -460,6 +510,7 @@ function destroyPlayer(guildId, shoukaku) {
     stopPanelRefresh(guildId);
     clearAutomixRetry(guildId);
     recentlyPlayedUris.delete(guildId);
+    recentlyPlayedAuthors.delete(guildId);
     try {
         shoukaku.leaveVoiceChannel(guildId);
     } catch { }
