@@ -110,6 +110,7 @@ async function createGuildPlayer({ guildId, voiceChannelId, shardId, textChannel
     });
 
     player.on('exception', async (error) => {
+        if (!players.has(guildId)) return;
         console.error(`[Player] Exception in guild ${guildId}:`, error?.message || error);
         state.textChannel?.send({ embeds: [{ color: 0xED4245, description: '❌ Track error, skipping...' }] }).catch(() => { });
         await playNext(guildId);
