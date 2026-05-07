@@ -2,6 +2,11 @@ const { formatDuration } = require('./formatDuration');
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { getGuildSettings } = require('./config');
 const { buildBrandPayload } = require('./brandAssets');
+const { updateMusicPanel } = require('./musicPanel');
+
+/** @type {import('discord.js').Client|null} */
+let _client = null;
+function setDiscordClient(c) { _client = c; }
 
 /** @type {Map<string, PlayerState>} guildId → state */
 const players = new Map();
@@ -91,6 +96,7 @@ async function tryRecoverTrack(guildId, state, shoukaku) {
             }).catch(() => { });
 
             await state.player.playTrack({ track: { encoded: recovered.encoded } });
+            if (_client) updateMusicPanel(_client, guildId, state).catch(() => { });
             state.textChannel?.send({
                 ...buildBrandPayload(buildNowPlayingEmbed(recovered), { includeBanner: true }),
                 components: [buildPlayerControlsRow()],
@@ -121,6 +127,7 @@ async function playNext(guildId, { silent = false } = {}) {
 
     if (!next) {
         state.current = null;
+        if (_client) updateMusicPanel(_client, guildId, null).catch(() => { });
         if (state.is247) return;
         try {
             state.player.connection.disconnect();
@@ -134,6 +141,7 @@ async function playNext(guildId, { silent = false } = {}) {
 
     try {
         await state.player.playTrack({ track: { encoded: next.encoded } });
+        if (_client) updateMusicPanel(_client, guildId, state).catch(() => { });
         if (!silent) {
             state.textChannel?.send({
                 ...buildBrandPayload(buildNowPlayingEmbed(next), { includeBanner: true }),
@@ -267,4 +275,5 @@ module.exports = {
     buildNowPlayingEmbed,
     buildPlayerControlsRow,
     applyPlayerVolume,
+    setDiscordClient,
 };

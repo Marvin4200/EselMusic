@@ -7,21 +7,25 @@ const DEFAULT_GUILD_SETTINGS = {
     djRoleId: null,
     is247: false,
     volume: 100,
+    musicChannelId: null,
+    musicPanelMsgId: null,
 };
 
 const getStmt = db.prepare(`
-SELECT guild_id, dj_role_id, is_247, volume
+SELECT guild_id, dj_role_id, is_247, volume, music_channel_id, music_panel_msg_id
 FROM guild_settings
 WHERE guild_id = ?
 `);
 
 const upsertStmt = db.prepare(`
-INSERT INTO guild_settings (guild_id, dj_role_id, is_247, volume, updated_at)
-VALUES (@guild_id, @dj_role_id, @is_247, @volume, CURRENT_TIMESTAMP)
+INSERT INTO guild_settings (guild_id, dj_role_id, is_247, volume, music_channel_id, music_panel_msg_id, updated_at)
+VALUES (@guild_id, @dj_role_id, @is_247, @volume, @music_channel_id, @music_panel_msg_id, CURRENT_TIMESTAMP)
 ON CONFLICT(guild_id) DO UPDATE SET
     dj_role_id = excluded.dj_role_id,
     is_247 = excluded.is_247,
     volume = excluded.volume,
+    music_channel_id = excluded.music_channel_id,
+    music_panel_msg_id = excluded.music_panel_msg_id,
     updated_at = CURRENT_TIMESTAMP
 `);
 
@@ -64,6 +68,8 @@ function getGuildSettings(guildId) {
         djRoleId: row.dj_role_id || null,
         is247: Boolean(row.is_247),
         volume: Number.isFinite(row.volume) ? Math.max(0, Math.min(150, row.volume)) : 100,
+        musicChannelId: row.music_channel_id || null,
+        musicPanelMsgId: row.music_panel_msg_id || null,
     };
 }
 
@@ -76,6 +82,8 @@ function setGuildSettings(guildId, update) {
         dj_role_id: merged.djRoleId || null,
         is_247: merged.is247 ? 1 : 0,
         volume: Number.isFinite(merged.volume) ? Math.max(0, Math.min(150, merged.volume)) : 100,
+        music_channel_id: merged.musicChannelId || null,
+        music_panel_msg_id: merged.musicPanelMsgId || null,
     });
 }
 
