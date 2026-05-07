@@ -1,5 +1,5 @@
 const { SlashCommandBuilder } = require('discord.js');
-const { players, createGuildPlayer } = require('../utils/playerManager');
+const { players, createGuildPlayer, playNext } = require('../utils/playerManager');
 const { getGuildSettings, setGuildSettings } = require('../utils/config');
 
 module.exports = {
@@ -31,18 +31,29 @@ module.exports = {
             const voiceChannel = interaction.member.voice.channel;
             if (voiceChannel) {
                 try {
-                    await createGuildPlayer({
+                    const created = await createGuildPlayer({
                         guildId: interaction.guildId,
                         voiceChannelId: voiceChannel.id,
                         shardId: interaction.guild.shardId,
                         textChannel: interaction.channel,
                         shoukaku,
                     });
+
+                    // Kick off autoplay immediately in 24/7 mode.
+                    if (!created.current && created.queue.length === 0) {
+                        await playNext(interaction.guildId, { silent: true });
+                    }
+
                     return interaction.reply({
                         embeds: [{ color: 0x5865F2, description: `${icon} 24/7 Modus **${statusText}** — Bot ist deinem Channel beigetreten und bleibt dort.` }],
                     });
                 } catch { /* fall through to normal reply */ }
             }
+        }
+
+        // If bot is already connected and idle, trigger 24/7 autoplay now.
+        if (new247 && state && !state.current && state.queue.length === 0) {
+            await playNext(interaction.guildId, { silent: true });
         }
 
         const hint = new247 && !state
