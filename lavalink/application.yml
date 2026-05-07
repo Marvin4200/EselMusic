@@ -10,8 +10,8 @@ plugins:
     allowDirectPlaylistIds: true
     clients:
       - MUSIC
-      - ANDROID_LITE
-      - WEB
+      - TVHTML5_SIMPLY_EMBEDDED_PLAYER
+      - WEB_REMIX
 
 lavalink:
   plugins:
