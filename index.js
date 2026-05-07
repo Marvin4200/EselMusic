@@ -149,6 +149,7 @@ client.on('interactionCreate', async (interaction) => {
                 }
                 case 'music:skip': {
                     const skipped = state.current?.info?.title || 'current track';
+                    if (state.loop === 'track') state.loop = 'off';
                     await state.player.stopTrack();
                     return interaction.reply({ embeds: [{ color: 0x5865F2, description: `⏭️ Skipped **${skipped}**` }], flags: [64] });
                 }

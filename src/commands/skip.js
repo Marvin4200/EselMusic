@@ -18,7 +18,9 @@ module.exports = {
         }
 
         const skipped = state.current.info.title;
+        const wasLooping = state.loop === 'track';
+        if (wasLooping) state.loop = 'off'; // force past the current track
         await state.player.stopTrack(); // triggers 'end' → playNext
-        return interaction.reply({ embeds: [{ color: 0x5865F2, description: `⏭️ Skipped **${skipped}**` }] });
+        return interaction.reply({ embeds: [{ color: 0x5865F2, description: `⏭️ Skipped **${skipped}**${wasLooping ? ' *(Track-Loop deaktiviert)*' : ''}` }] });
     },
 };
