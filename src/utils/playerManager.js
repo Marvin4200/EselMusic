@@ -80,12 +80,48 @@ async function createGuildPlayer({ guildId, voiceChannelId, shardId, textChannel
         return existing;
     }
 
-    const player = await shoukaku.joinVoiceChannel({
-        guildId,
-        channelId: voiceChannelId,
-        shardId,
-        deaf: true,
-    });
+    const stalePlayer = shoukaku.players?.get(guildId);
+    if (stalePlayer) {
+        /** @type {PlayerState} */
+        const recoveredState = {
+            player: stalePlayer,
+            queue: [],
+            current: null,
+            loop: 'none',
+            volume: 100,
+            textChannel,
+            is247: false,
+        };
+        players.set(guildId, recoveredState);
+        return recoveredState;
+    }
+
+    let player;
+    try {
+        player = await shoukaku.joinVoiceChannel({
+            guildId,
+            channelId: voiceChannelId,
+            shardId,
+            deaf: true,
+        });
+    } catch (err) {
+        const message = err?.message || '';
+        if (!message.includes('already have an existing connection')) {
+            throw err;
+        }
+
+        // If Lavalink still has a stale voice session, clear it and retry once.
+        try {
+            shoukaku.leaveVoiceChannel(guildId);
+        } catch { }
+
+        player = await shoukaku.joinVoiceChannel({
+            guildId,
+            channelId: voiceChannelId,
+            shardId,
+            deaf: true,
+        });
+    }
 
     /** @type {PlayerState} */
     const state = {

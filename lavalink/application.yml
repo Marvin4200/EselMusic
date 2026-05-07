@@ -10,8 +10,8 @@ plugins:
     allowDirectPlaylistIds: true
     clients:
       - MUSIC
-      - IOS
       - ANDROID_LITE
+      - WEB
 
 lavalink:
   plugins:
