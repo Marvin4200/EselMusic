@@ -14,6 +14,15 @@ function setShoukaku(s) { _shoukaku = s; }
 
 /** @type {Map<string, NodeJS.Timeout>} guildId → refresh interval */
 const refreshIntervals = new Map();
+/** @type {Map<string, NodeJS.Timeout>} guildId → 24/7 retry timeout */
+const automixRetryTimeouts = new Map();
+
+const AUTOPLAY_RETRY_MS = 15_000;
+const FALLBACK_STREAMS = [
+    'https://ice1.somafm.com/groovesalad-256-mp3',
+    'https://ice1.somafm.com/dronezone-256-mp3',
+    'https://ice1.somafm.com/beatblender-128-mp3',
+];
 
 function startPanelRefresh(guildId) {
     stopPanelRefresh(guildId);
@@ -29,6 +38,26 @@ function startPanelRefresh(guildId) {
 function stopPanelRefresh(guildId) {
     const existing = refreshIntervals.get(guildId);
     if (existing) { clearInterval(existing); refreshIntervals.delete(guildId); }
+}
+
+function clearAutomixRetry(guildId) {
+    const timeout = automixRetryTimeouts.get(guildId);
+    if (timeout) {
+        clearTimeout(timeout);
+        automixRetryTimeouts.delete(guildId);
+    }
+}
+
+function scheduleAutomixRetry(guildId) {
+    clearAutomixRetry(guildId);
+    const timeout = setTimeout(() => {
+        automixRetryTimeouts.delete(guildId);
+        const state = players.get(guildId);
+        if (!state || !state.is247) return;
+        if (state.current || state.queue.length > 0) return;
+        playNext(guildId, { silent: true }).catch(() => { });
+    }, AUTOPLAY_RETRY_MS);
+    automixRetryTimeouts.set(guildId, timeout);
 }
 
 async function getRelatedTrackFor247(guildId) {
@@ -55,6 +84,35 @@ async function getRelatedTrackFor247(guildId) {
             if (picked) return { track: picked, seed: last };
         } catch {
             // Try next fallback query.
+        }
+    }
+
+    return null;
+}
+
+async function getFallbackStreamTrackFor247() {
+    if (!_shoukaku) return null;
+    const node = _shoukaku.getIdealNode();
+    if (!node) return null;
+
+    for (const url of FALLBACK_STREAMS) {
+        try {
+            const resolved = await node.rest.resolve(url);
+            if (!resolved || resolved.loadType === 'empty' || resolved.loadType === 'error') continue;
+
+            const track = resolved.loadType === 'track' ? resolved.data
+                : resolved.loadType === 'search' ? resolved.data?.[0]
+                : resolved.data?.tracks?.[0];
+
+            if (track) {
+                if (track.info) {
+                    track.info.isStream = true;
+                    track.info.author = track.info.author || 'AutoMix Radio';
+                }
+                return track;
+            }
+        } catch {
+            // Try next fallback stream URL.
         }
     }
 
@@ -183,17 +241,30 @@ async function playNext(guildId, { silent = false } = {}) {
         stopPanelRefresh(guildId);
         if (_client) updateMusicPanel(_client, guildId, null).catch(() => { });
         if (state.is247) {
+            clearAutomixRetry(guildId);
             const related = await getRelatedTrackFor247(guildId);
-            if (!related?.track) {
-                state.textChannel?.send({ embeds: [{ color: 0xFEE75C, description: '⚠️ 24/7 aktiv, aber keine verwandten Songs gefunden.' }] }).catch(() => { });
-                return;
+            if (related?.track) {
+                state.queue.push(related.track);
+                state.textChannel?.send({
+                    embeds: [{ color: 0x5865F2, description: `🔁 **24/7 AutoMix**: Verwandter Song zu **${related.seed.title}** geladen.` }],
+                }).catch(() => { });
+                return playNext(guildId, { silent: true });
             }
 
-            state.queue.push(related.track);
+            const fallbackStream = await getFallbackStreamTrackFor247();
+            if (fallbackStream) {
+                state.queue.push(fallbackStream);
+                state.textChannel?.send({
+                    embeds: [{ color: 0x5865F2, description: '📻 **24/7 AutoMix**: Keine Related-Songs gefunden, starte Fallback-Radio.' }],
+                }).catch(() => { });
+                return playNext(guildId, { silent: true });
+            }
+
             state.textChannel?.send({
-                embeds: [{ color: 0x5865F2, description: `🔁 **24/7 AutoMix**: Verwandter Song zu **${related.seed.title}** geladen.` }],
+                embeds: [{ color: 0xFEE75C, description: '⚠️ 24/7 aktiv, Quelle gerade nicht erreichbar. Neuer Versuch in 15s...' }],
             }).catch(() => { });
-            return playNext(guildId, { silent: true });
+            scheduleAutomixRetry(guildId);
+            return;
         }
         try {
             state.player.connection.disconnect();
@@ -206,6 +277,7 @@ async function playNext(guildId, { silent = false } = {}) {
     state.current = next;
 
     try {
+        clearAutomixRetry(guildId);
         await state.player.playTrack({ track: { encoded: next.encoded } });
         recordPlay(guildId, next.info);
         startPanelRefresh(guildId);
@@ -333,6 +405,7 @@ function destroyPlayer(guildId, shoukaku) {
     const state = players.get(guildId);
     if (!state) return;
     stopPanelRefresh(guildId);
+    clearAutomixRetry(guildId);
     try {
         shoukaku.leaveVoiceChannel(guildId);
     } catch { }
