@@ -21,6 +21,14 @@ const client = new Client({
 });
 
 // ─── Lavalink / Shoukaku ─────────────────────────────────────────────────────
+// Validate Lavalink password is not default in production
+if (process.env.NODE_ENV === 'production' &&
+    (!process.env.LAVALINK_PASSWORD || process.env.LAVALINK_PASSWORD === 'youshallnotpass')) {
+    throw new Error('LAVALINK_PASSWORD must be set and must not be the default "youshallnotpass" in production. Refusing to start.');
+} else if (!process.env.LAVALINK_PASSWORD || process.env.LAVALINK_PASSWORD === 'youshallnotpass') {
+    console.warn('[WARN] Using default Lavalink password — change LAVALINK_PASSWORD before deploying to production!');
+}
+
 const lavalinkNodes = [{
     name: 'main',
     url: process.env.LAVALINK_HOST || 'localhost:2333',
