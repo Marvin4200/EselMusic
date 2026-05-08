@@ -18,6 +18,10 @@ const refreshIntervals = new Map();
 const automixRetryTimeouts = new Map();
 /** @type {Map<string, NodeJS.Timeout>} guildId → 24/7 voice rejoin timeout */
 const rejoinTimeouts = new Map();
+/** @type {Map<string, number>} guildId → consecutive failed rejoin attempts */
+const rejoinFailCounts = new Map();
+/** Stop retrying rejoin after this many consecutive failures and clear 24/7 state */
+const MAX_REJOIN_ATTEMPTS = 5;
 /** @type {Map<string, string[]>} guildId → recently played URIs (last 25) */
 const recentlyPlayedUris = new Map();
 /** @type {Map<string, string[]>} guildId → recently played authors (last 10) */
@@ -125,25 +129,49 @@ function clearRejoin(guildId) {
 
 /**
  * Schedules an automatic voice-channel rejoin for a 24/7 guild after a disconnect.
- * Retries indefinitely with exponential back-off (10s → 30s → 60s cap).
+ * Retries up to MAX_REJOIN_ATTEMPTS times with exponential back-off (10s → 20s → … 60s cap).
+ * After max attempts, disables 24/7 for that guild to prevent infinite loops.
  */
-function scheduleRejoin(guildId, delayMs = 10_000) {
+function scheduleRejoin(guildId, delayMs = 10_000, attempt = 1) {
     clearRejoin(guildId);
+
+    if (attempt > MAX_REJOIN_ATTEMPTS) {
+        console.warn(`[247] Max rejoin attempts (${MAX_REJOIN_ATTEMPTS}) reached for guild ${guildId}. Disabling 24/7 to prevent infinite loops.`);
+        rejoinFailCounts.delete(guildId);
+        // Clear persisted 24/7 state so the bot doesn't keep trying on next restart.
+        const { setGuildSettings: _set } = require('./config');
+        _set(guildId, { is247: false, voiceChannelId: null });
+        return;
+    }
+
     const t = setTimeout(async () => {
         rejoinTimeouts.delete(guildId);
-        if (players.has(guildId)) return; // already reconnected
-        if (!_client || !_shoukaku) {
-            scheduleRejoin(guildId, Math.min(delayMs * 2, 60_000));
+
+        if (players.has(guildId)) {
+            // Already reconnected (e.g., by a concurrent path) — reset counter.
+            rejoinFailCounts.delete(guildId);
             return;
         }
+
+        if (!_client || !_shoukaku) {
+            scheduleRejoin(guildId, Math.min(delayMs * 2, 60_000), attempt + 1);
+            return;
+        }
+
         const { getGuildSettings } = require('./config');
         const settings = getGuildSettings(guildId);
-        if (!settings.is247 || !settings.voiceChannelId) return;
-        const guild = _client.guilds.cache.get(guildId);
-        if (!guild) {
-            scheduleRejoin(guildId, Math.min(delayMs * 2, 60_000));
+        if (!settings.is247 || !settings.voiceChannelId) {
+            rejoinFailCounts.delete(guildId);
             return;
         }
+
+        const guild = _client.guilds.cache.get(guildId);
+        if (!guild) {
+            scheduleRejoin(guildId, Math.min(delayMs * 2, 60_000), attempt + 1);
+            return;
+        }
+
+        console.log(`[247] Rejoin attempt ${attempt}/${MAX_REJOIN_ATTEMPTS} for guild ${guildId} (delay was ${delayMs}ms)`);
         try {
             const textChannel = settings.musicChannelId
                 ? guild.channels.cache.get(settings.musicChannelId)
@@ -156,10 +184,11 @@ function scheduleRejoin(guildId, delayMs = 10_000) {
                 shoukaku: _shoukaku,
             });
             await playNext(guildId, { silent: true });
-            console.log(`[247] Rejoined voice channel after disconnect in guild ${guildId}`);
+            rejoinFailCounts.delete(guildId); // success — reset counter
+            console.log(`[247] Rejoined voice channel in guild ${guildId} after ${attempt} attempt(s)`);
         } catch (err) {
-            console.warn(`[247] Rejoin attempt failed for guild ${guildId}: ${err.message}`);
-            scheduleRejoin(guildId, Math.min(delayMs * 2, 60_000));
+            console.warn(`[247] Rejoin attempt ${attempt}/${MAX_REJOIN_ATTEMPTS} failed for guild ${guildId}: ${err.message}`);
+            scheduleRejoin(guildId, Math.min(delayMs * 2, 60_000), attempt + 1);
         }
     }, delayMs);
     rejoinTimeouts.set(guildId, t);
@@ -592,6 +621,7 @@ module.exports = {
     createGuildPlayer,
     playNext,
     destroyPlayer,
+    scheduleRejoin,
     buildNowPlayingEmbed,
     buildPlayerControlsRow,
     applyPlayerVolume,

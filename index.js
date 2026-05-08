@@ -5,7 +5,7 @@ const { Shoukaku, Connectors } = require('shoukaku');
 const fs = require('fs');
 const path = require('path');
 
-const { players, destroyPlayer, setDiscordClient, setShoukaku, createGuildPlayer, playNext } = require('./src/utils/playerManager');
+const { players, destroyPlayer, setDiscordClient, setShoukaku, createGuildPlayer, playNext, scheduleRejoin } = require('./src/utils/playerManager');
 const { getPlaybackControlError } = require('./src/utils/djCheck');
 const { getGuildSettings, getAllIs247Guilds } = require('./src/utils/config');
 const { updateMusicPanel } = require('./src/utils/musicPanel');
@@ -89,7 +89,8 @@ client.once('clientReady', async () => {
     console.log(`✅ Registered ${commandData.length} slash command(s) in ${registered}/${guilds.length} guild(s)`);
 
     // ── 24/7 Auto-Rejoin after restart ────────────────────────────────────────
-    // Wait a moment for Lavalink node to be ready before rejoining
+    // Wait for Lavalink node to be fully ready before rejoining.
+    // On failure, fall back to scheduleRejoin which retries with exponential backoff.
     setTimeout(async () => {
         const is247Guilds = getAllIs247Guilds();
         for (const row of is247Guilds) {
@@ -115,10 +116,11 @@ client.once('clientReady', async () => {
                     .catch(() => { });
                 console.log(`[247] Rejoined voice channel ${row.voice_channel_id} in guild ${row.guild_id}`);
             } catch (err) {
-                console.warn(`[247] Failed to rejoin guild ${row.guild_id}:`, err.message);
+                console.warn(`[247] Initial rejoin failed for guild ${row.guild_id}: ${err.message} — scheduling retry with backoff`);
+                scheduleRejoin(row.guild_id);
             }
         }
-    }, 8000);
+    }, 15_000);
 });
 
 client.on('interactionCreate', async (interaction) => {
@@ -311,37 +313,14 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 
     // ── Bot itself was disconnected/kicked ────────────────────────────────────
     if (oldState.id === botId && oldState.channelId && !newState.channelId) {
-        const guildState = players.get(oldState.guild.id);
         const settings = getGuildSettings(oldState.guild.id);
-        if (settings.is247 && settings.voiceChannelId) {
-            // Wait briefly then rejoin
-            setTimeout(async () => {
-                try {
-                    const guild = client.guilds.cache.get(oldState.guild.id);
-                    const voiceChannel = guild?.channels.cache.get(settings.voiceChannelId);
-                    if (!voiceChannel) return;
-                    const textChannel = settings.musicChannelId
-                        ? guild.channels.cache.get(settings.musicChannelId)
-                        : guildState?.textChannel ?? null;
-                    await createGuildPlayer({
-                        guildId: oldState.guild.id,
-                        voiceChannelId: settings.voiceChannelId,
-                        shardId: guild.shardId,
-                        textChannel,
-                        shoukaku,
-                    });
-                    await playNext(oldState.guild.id, { silent: true });
-                    textChannel?.send({ embeds: [{ color: 0x5865F2, description: '🔁 **24/7 Modus** — Bot ist nach Disconnect wieder beigetreten.' }] })
-                        .then(m => setTimeout(() => m.delete().catch(() => {}), 10_000))
-                        .catch(() => { });
-                } catch (err) {
-                    console.warn('[247] Auto-rejoin after kick failed:', err.message);
-                }
-            }, 3000);
-        } else {
+        if (!settings.is247) {
             // Not 24/7 — clean up player state
             players.delete(oldState.guild.id);
         }
+        // For 24/7 guilds: player.on('closed') in playerManager fires when Shoukaku
+        // detects the voice drop and calls scheduleRejoin() with exponential backoff
+        // and a max-retry cap. No additional rejoin logic needed here.
         return;
     }
 
