@@ -18,6 +18,8 @@ const refreshIntervals = new Map();
 const automixRetryTimeouts = new Map();
 /** @type {Map<string, NodeJS.Timeout>} guildId → 24/7 voice rejoin timeout */
 const rejoinTimeouts = new Map();
+/** @type {Set<string>} guildIds where createGuildPlayer is actively replacing the connection (suppress closed-handler rejoin) */
+const replacingGuilds = new Set();
 /** @type {Map<string, number>} guildId → consecutive failed rejoin attempts */
 const rejoinFailCounts = new Map();
 /** @type {Map<string, NodeJS.Timeout>} guildId → timer to reset reconnect-failure counter after stable voice connection */
@@ -75,7 +77,11 @@ function pickDiverseSeedArtist(guildId) {
     return pool[Math.floor(Math.random() * pool.length)];
 }
 
-const AUTOPLAY_RETRY_MS = 15_000;
+const AUTOPLAY_RETRY_MS = 5_000;
+/** How many tracks to keep buffered ahead in 24/7 mode */
+const BUFFER_TARGET = 3;
+/** Guards against concurrent pre-fetch for the same guild */
+const prefetchingGuilds = new Set();
 const DEUTSCHRAP_HINT = 'deutschrap';
 const DEUTSCHRAP_KEYWORDS = [
     'deutschrap', 'deutsch rap', 'german rap', 'german hip hop', 'hip hop deutsch',
@@ -160,13 +166,15 @@ function armRejoinStabilityReset(guildId) {
 function scheduleRejoin(guildId, delayMs = 10_000, attempt = 1) {
     clearRejoin(guildId);
 
+    const { getGuildSettings, setGuildSettings } = require('./config');
+
     if (attempt > MAX_REJOIN_ATTEMPTS) {
-        console.warn(`[247] Max rejoin attempts (${MAX_REJOIN_ATTEMPTS}) reached for guild ${guildId}. Disabling 24/7 to prevent infinite loops.`);
+        const settings = getGuildSettings(guildId);
+        const channelId = settings.voiceChannelId ? settings.voiceChannelId : 'unknown';
+        setGuildSettings(guildId, { is247: false });
         clearRejoinStability(guildId);
         rejoinFailCounts.delete(guildId);
-        // Clear persisted 24/7 state so the bot doesn't keep trying on next restart.
-        const { setGuildSettings: _set } = require('./config');
-        _set(guildId, { is247: false, voiceChannelId: null });
+        console.warn('[247] Rejoin disabled after max attempts: guildId=' + guildId + ' channelId=' + channelId + ' attempt=' + attempt + ' reason=max_attempts_exceeded');
         return;
     }
 
@@ -174,19 +182,26 @@ function scheduleRejoin(guildId, delayMs = 10_000, attempt = 1) {
         rejoinTimeouts.delete(guildId);
 
         if (players.has(guildId)) {
-            // Already reconnected (e.g., by a concurrent path).
             armRejoinStabilityReset(guildId);
             return;
         }
 
-        if (!_client || !_shoukaku) {
+        if (!_client) {
+            scheduleRejoin(guildId, Math.min(delayMs * 2, 60_000), attempt + 1);
+            return;
+        }
+        if (!_shoukaku) {
             scheduleRejoin(guildId, Math.min(delayMs * 2, 60_000), attempt + 1);
             return;
         }
 
-        const { getGuildSettings } = require('./config');
         const settings = getGuildSettings(guildId);
-        if (!settings.is247 || !settings.voiceChannelId) {
+        if (!settings.is247) {
+            clearRejoinStability(guildId);
+            rejoinFailCounts.delete(guildId);
+            return;
+        }
+        if (!settings.voiceChannelId) {
             clearRejoinStability(guildId);
             rejoinFailCounts.delete(guildId);
             return;
@@ -198,24 +213,85 @@ function scheduleRejoin(guildId, delayMs = 10_000, attempt = 1) {
             return;
         }
 
-        console.log(`[247] Rejoin attempt ${attempt}/${MAX_REJOIN_ATTEMPTS} for guild ${guildId} (delay was ${delayMs}ms)`);
+        const targetChannel = guild.channels.cache.get(settings.voiceChannelId);
+        let isVoiceChannel = false;
+        if (targetChannel) {
+            if (typeof targetChannel.isVoiceBased === 'function') {
+                if (targetChannel.isVoiceBased()) {
+                    isVoiceChannel = true;
+                }
+            }
+        }
+        if (!isVoiceChannel) {
+            setGuildSettings(guildId, { is247: false });
+            clearRejoinStability(guildId);
+            rejoinFailCounts.delete(guildId);
+            console.warn('[247] Rejoin disabled: guildId=' + guildId + ' channelId=' + settings.voiceChannelId + ' attempt=' + attempt + ' reason=voice_channel_missing_or_invalid');
+            return;
+        }
+
+        let me = guild.members.me;
+        if (!me) {
+            if (_client.user) {
+                me = guild.members.cache.get(_client.user.id);
+            }
+        }
+        let canJoin = true;
+        if (me) {
+            const perms = targetChannel.permissionsFor(me);
+            if (perms) {
+                if (!perms.has('ViewChannel')) canJoin = false;
+                if (!perms.has('Connect')) canJoin = false;
+            }
+        }
+        if (!canJoin) {
+            setGuildSettings(guildId, { is247: false });
+            clearRejoinStability(guildId);
+            rejoinFailCounts.delete(guildId);
+            console.warn('[247] Rejoin disabled: guildId=' + guildId + ' channelId=' + settings.voiceChannelId + ' attempt=' + attempt + ' reason=missing_voice_permissions');
+            return;
+        }
+
+        console.log('[247] Rejoin attempt: guildId=' + guildId + ' channelId=' + settings.voiceChannelId + ' attempt=' + attempt + '/' + MAX_REJOIN_ATTEMPTS + ' delayMs=' + delayMs);
         try {
-            const textChannel = settings.musicChannelId
-                ? guild.channels.cache.get(settings.musicChannelId)
-                : null;
+            let textChannel = null;
+            if (settings.musicChannelId) {
+                textChannel = guild.channels.cache.get(settings.musicChannelId);
+            }
             await createGuildPlayer({
                 guildId,
                 voiceChannelId: settings.voiceChannelId,
                 shardId: guild.shardId,
-                textChannel: textChannel || null,
+                textChannel,
                 shoukaku: _shoukaku,
             });
             await playNext(guildId, { silent: true });
             armRejoinStabilityReset(guildId);
-            console.log(`[247] Rejoined voice channel in guild ${guildId} after ${attempt} attempt(s)`);
+            console.log('[247] Rejoin success: guildId=' + guildId + ' channelId=' + settings.voiceChannelId + ' attempt=' + attempt);
         } catch (err) {
+            let reason = 'unknown_error';
+            if (err) {
+                if (err.message) reason = err.message;
+            }
             rejoinFailCounts.set(guildId, attempt);
-            console.warn(`[247] Rejoin attempt ${attempt}/${MAX_REJOIN_ATTEMPTS} failed for guild ${guildId}: ${err.message}`);
+
+            if (/operation was aborted/i.test(reason)) {
+                setGuildSettings(guildId, { is247: false });
+                clearRejoinStability(guildId);
+                rejoinFailCounts.delete(guildId);
+                console.warn('[247] Rejoin disabled: guildId=' + guildId + ' channelId=' + settings.voiceChannelId + ' attempt=' + attempt + ' reason=operation_aborted');
+                return;
+            }
+
+            if (attempt >= MAX_REJOIN_ATTEMPTS) {
+                setGuildSettings(guildId, { is247: false });
+                clearRejoinStability(guildId);
+                rejoinFailCounts.delete(guildId);
+                console.warn('[247] Rejoin disabled after failures: guildId=' + guildId + ' channelId=' + settings.voiceChannelId + ' attempt=' + attempt + ' reason=' + reason);
+                return;
+            }
+
+            console.warn('[247] Rejoin failed: guildId=' + guildId + ' channelId=' + settings.voiceChannelId + ' attempt=' + attempt + '/' + MAX_REJOIN_ATTEMPTS + ' reason=' + reason);
             scheduleRejoin(guildId, Math.min(delayMs * 2, 60_000), attempt + 1);
         }
     }, delayMs);
@@ -229,7 +305,10 @@ function scheduleAutomixRetry(guildId) {
         const state = players.get(guildId);
         if (!state || !state.is247) return;
         if (state.current || state.queue.length > 0) return;
-        playNext(guildId, { silent: true }).catch(() => { });
+        console.log(`[247] Automix retry firing for guild ${guildId}...`);
+        playNext(guildId, { silent: true }).catch(err => {
+            console.warn(`[247] Automix retry error for guild ${guildId}: ${err.message}`);
+        });
     }, AUTOPLAY_RETRY_MS);
     automixRetryTimeouts.set(guildId, timeout);
 }
@@ -305,6 +384,61 @@ async function getRelatedTrackFor247(guildId) {
     return null;
 }
 
+/**
+ * Fills the 24/7 queue up to BUFFER_TARGET tracks in the background.
+ * Safe to call at any time — concurrent calls for the same guild are deduped.
+ */
+async function fillBufferFor247(guildId) {
+    if (prefetchingGuilds.has(guildId)) return;
+    prefetchingGuilds.add(guildId);
+    try {
+        let attempts = 0;
+        while (attempts < BUFFER_TARGET * 2) {
+            attempts++;
+            const state = players.get(guildId);
+            if (!state || !state.is247) break;
+            if (state.queue.length >= BUFFER_TARGET) break;
+
+            const related = await getRelatedTrackFor247(guildId);
+            if (related?.track) {
+                const st = players.get(guildId);
+                if (st && st.is247 && st.queue.length < BUFFER_TARGET) {
+                    st.queue.push(related.track);
+                    console.log(`[247] Buffer [${st.queue.length}/${BUFFER_TARGET}] guild ${guildId}: ${related.track.info?.title}`);
+                }
+                continue;
+            }
+
+            const fallback = await getFallbackDeutschrapTrackFor247();
+            if (fallback) {
+                const st = players.get(guildId);
+                if (st && st.is247 && st.queue.length < BUFFER_TARGET) {
+                    st.queue.push(fallback);
+                    console.log(`[247] Buffer fallback [${st.queue.length}/${BUFFER_TARGET}] guild ${guildId}: ${fallback.info?.title}`);
+                }
+                continue;
+            }
+
+            // Both search paths failed — stop this cycle
+            console.warn(`[247] fillBuffer: no track found for guild ${guildId}, stopping cycle`);
+            break;
+        }
+    } catch (err) {
+        console.warn(`[247] fillBuffer failed for guild ${guildId}: ${err.message}`);
+    } finally {
+        prefetchingGuilds.delete(guildId);
+    }
+}
+
+// Global 24/7 buffer watchdog — every 30 s, top up any queue that fell below target
+setInterval(() => {
+    for (const [guildId, state] of players) {
+        if (state.is247 && state.queue.length < BUFFER_TARGET && !prefetchingGuilds.has(guildId)) {
+            fillBufferFor247(guildId).catch(() => { });
+        }
+    }
+}, 30_000);
+
 async function getFallbackDeutschrapTrackFor247() {
     if (!_shoukaku) return null;
     const node = _shoukaku.getIdealNode();
@@ -319,7 +453,10 @@ async function getFallbackDeutschrapTrackFor247() {
     for (const query of fallbackQueries) {
         try {
             const resolved = await node.rest.resolve(query);
-            if (!resolved || resolved.loadType !== 'search' || !Array.isArray(resolved.data) || resolved.data.length === 0) continue;
+            if (!resolved || resolved.loadType !== 'search' || !Array.isArray(resolved.data) || resolved.data.length === 0) {
+                console.warn(`[247] Fallback query "${query}" → loadType: ${resolved?.loadType ?? 'null'}, results: ${resolved?.data?.length ?? 0}`);
+                continue;
+            }
 
             const candidates = resolved.data.slice(0, 15);
             const matchedCandidates = candidates.filter((t) => {
@@ -327,18 +464,38 @@ async function getFallbackDeutschrapTrackFor247() {
                 return DEUTSCHRAP_KEYWORDS.some(k => text.includes(k));
             });
             // Strict: skip this query if nothing matches Deutschrap.
-            if (matchedCandidates.length === 0) continue;
+            if (matchedCandidates.length === 0) {
+                console.warn(`[247] Fallback query "${query}" returned ${candidates.length} results but 0 matched Deutschrap filter. Top: ${candidates[0]?.info?.title} by ${candidates[0]?.info?.author}`);
+                continue;
+            }
             // Pick randomly to avoid always returning the same fallback track
             const track = matchedCandidates[Math.floor(Math.random() * matchedCandidates.length)];
             if (track.info) {
                 track.info.author = track.info.author || 'Deutschrap AutoMix';
             }
+            console.log(`[247] Fallback found: "${track.info?.title}" by "${track.info?.author}" via query "${query}"`);
             return track;
-        } catch {
-            // Try next fallback query.
+        } catch (err) {
+            console.warn(`[247] Fallback query "${query}" threw: ${err.message}`);
         }
     }
 
+    // Absolute last resort: return ANY result without Deutschrap keyword filter
+    // This ensures music plays even if YouTube returns unexpected results.
+    console.warn('[247] All strict-filter fallback queries failed. Trying last-resort (no filter)...');
+    for (const query of fallbackQueries) {
+        try {
+            const resolved = await node.rest.resolve(query);
+            if (!resolved || resolved.loadType !== 'search' || !Array.isArray(resolved.data) || resolved.data.length === 0) continue;
+            const track = resolved.data[0];
+            if (track?.encoded) {
+                console.warn(`[247] Last-resort (no filter): "${track.info?.title}" by "${track.info?.author}"`);
+                return track;
+            }
+        } catch { }
+    }
+
+    console.error('[247] getFallbackDeutschrapTrackFor247: ALL queries failed — Lavalink may be unable to reach YouTube!');
     return null;
 }
 
@@ -446,7 +603,11 @@ async function tryRecoverTrack(guildId, state, shoukaku) {
 
 async function playNext(guildId, { silent = false } = {}) {
     const state = players.get(guildId);
-    if (!state) return;
+    if (!state) {
+        console.warn(`[DEBUG-247] playNext(${guildId}): NO STATE — player was removed before playNext ran`);
+        return;
+    }
+    console.log(`[DEBUG-247] playNext(${guildId}): is247=${state.is247} queue=${state.queue.length} current=${!!state.current} loop=${state.loop}`);
 
     let next = null;
 
@@ -468,23 +629,18 @@ async function playNext(guildId, { silent = false } = {}) {
             const related = await getRelatedTrackFor247(guildId);
             if (related?.track) {
                 state.queue.push(related.track);
-                sendTemp(state.textChannel, {
-                    embeds: [{ color: 0x5865F2, description: `🔁 **24/7 AutoMix**: Verwandter Song zu **${related.seed.title}** geladen.` }],
-                });
                 return playNext(guildId, { silent: true });
             }
 
             const fallbackTrack = await getFallbackDeutschrapTrackFor247();
             if (fallbackTrack) {
                 state.queue.push(fallbackTrack);
-                sendTemp(state.textChannel, {
-                    embeds: [{ color: 0x5865F2, description: '🎤 **24/7 Deutschrap AutoMix**: Keine direkten Related-Songs gefunden, nutze Deutschrap-Fallback.' }],
-                });
                 return playNext(guildId, { silent: true });
             }
 
+            console.warn(`[247] All search paths exhausted for guild ${guildId} — scheduling retry in ${AUTOPLAY_RETRY_MS}ms`);
             sendTemp(state.textChannel, {
-                embeds: [{ color: 0xFEE75C, description: '⚠️ 24/7 Deutschrap aktiv, Quelle gerade nicht erreichbar. Neuer Versuch in 15s...' }],
+                embeds: [{ color: 0xFEE75C, description: '⚠️ 24/7 Deutschrap aktiv, Quelle gerade nicht erreichbar. Neuer Versuch in 5s...' }],
             });
             scheduleAutomixRetry(guildId);
             return;
@@ -506,11 +662,10 @@ async function playNext(guildId, { silent = false } = {}) {
         addRecentUri(guildId, next.info?.uri, next.info?.author);
         startPanelRefresh(guildId);
         if (_client) updateMusicPanel(_client, guildId, state).catch(() => { });
-        if (!silent) {
-            sendTemp(state.textChannel, {
-                ...buildBrandPayload(buildNowPlayingEmbed(next), { includeBanner: true }),
-                components: [buildPlayerControlsRow()],
-            });
+
+        // Keep the buffer filled — trigger fill whenever queue is below target
+        if (state.is247 && state.queue.length < BUFFER_TARGET) {
+            fillBufferFor247(guildId).catch(() => { });
         }
     } catch (err) {
         console.error('[PLAYER_001] playNext error:', err);
@@ -531,10 +686,14 @@ async function createGuildPlayer({ guildId, voiceChannelId, shardId, textChannel
 
     // Clear stale guild connection handles before creating a fresh player.
     if (shoukaku.players?.has(guildId)) {
+        // Mark as replacing so the old player's 'closed' handler doesn't schedule a new rejoin.
+        replacingGuilds.add(guildId);
         try {
             shoukaku.leaveVoiceChannel(guildId);
         } catch { }
-        await new Promise(resolve => setTimeout(resolve, 350));
+        // Wait long enough for the 'closed' event to fire before clearing the guard.
+        await new Promise(resolve => setTimeout(resolve, 750));
+        replacingGuilds.delete(guildId);
     }
 
     let player = null;
@@ -619,10 +778,14 @@ async function createGuildPlayer({ guildId, voiceChannelId, shardId, textChannel
     });
 
     player.on('closed', () => {
+        // If createGuildPlayer is actively replacing this connection, ignore — it will set up the new player.
+        if (replacingGuilds.has(guildId)) return;
         const wasIs247 = state.is247;
         players.delete(guildId);
         if (wasIs247) {
             clearRejoinStability(guildId);
+            // Don't stack multiple rejoin timers — if one is already pending, skip.
+            if (rejoinTimeouts.has(guildId)) return;
             const failures = (rejoinFailCounts.get(guildId) || 0) + 1;
             rejoinFailCounts.set(guildId, failures);
             const nextDelay = Math.min(10_000 * Math.pow(2, Math.max(0, failures - 1)), 60_000);
@@ -650,15 +813,23 @@ function destroyPlayer(guildId, shoukaku) {
     players.delete(guildId);
 }
 
+function triggerPanelUpdate(guildId) {
+    if (!_client) return;
+    const state = players.get(guildId);
+    updateMusicPanel(_client, guildId, state || null).catch(() => {});
+}
+
 module.exports = {
     players,
     createGuildPlayer,
     playNext,
     destroyPlayer,
     scheduleRejoin,
+    triggerPanelUpdate,
     buildNowPlayingEmbed,
     buildPlayerControlsRow,
     applyPlayerVolume,
     setDiscordClient,
     setShoukaku,
+    sendTemp,
 };
