@@ -166,15 +166,11 @@ function armRejoinStabilityReset(guildId) {
 function scheduleRejoin(guildId, delayMs = 10_000, attempt = 1) {
     clearRejoin(guildId);
 
-    const { getGuildSettings, setGuildSettings } = require('./config');
-
     if (attempt > MAX_REJOIN_ATTEMPTS) {
-        const settings = getGuildSettings(guildId);
-        const channelId = settings.voiceChannelId ? settings.voiceChannelId : 'unknown';
-        setGuildSettings(guildId, { is247: false });
-        clearRejoinStability(guildId);
-        rejoinFailCounts.delete(guildId);
-        console.warn('[247] Rejoin disabled after max attempts: guildId=' + guildId + ' channelId=' + channelId + ' attempt=' + attempt + ' reason=max_attempts_exceeded');
+        // Never disable 24/7 — reset counter and keep retrying at 60s intervals
+        console.warn(`[247] Soft cap (${MAX_REJOIN_ATTEMPTS}) reached for guild ${guildId}. Resetting counter, retrying at 60s intervals.`);
+        rejoinFailCounts.set(guildId, 0);
+        scheduleRejoin(guildId, 60_000, 1);
         return;
     }
 
@@ -182,26 +178,19 @@ function scheduleRejoin(guildId, delayMs = 10_000, attempt = 1) {
         rejoinTimeouts.delete(guildId);
 
         if (players.has(guildId)) {
+            // Already reconnected (e.g., by a concurrent path).
             armRejoinStabilityReset(guildId);
             return;
         }
 
-        if (!_client) {
-            scheduleRejoin(guildId, Math.min(delayMs * 2, 60_000), attempt + 1);
-            return;
-        }
-        if (!_shoukaku) {
+        if (!_client || !_shoukaku) {
             scheduleRejoin(guildId, Math.min(delayMs * 2, 60_000), attempt + 1);
             return;
         }
 
+        const { getGuildSettings } = require('./config');
         const settings = getGuildSettings(guildId);
-        if (!settings.is247) {
-            clearRejoinStability(guildId);
-            rejoinFailCounts.delete(guildId);
-            return;
-        }
-        if (!settings.voiceChannelId) {
+        if (!settings.is247 || !settings.voiceChannelId) {
             clearRejoinStability(guildId);
             rejoinFailCounts.delete(guildId);
             return;
@@ -213,85 +202,24 @@ function scheduleRejoin(guildId, delayMs = 10_000, attempt = 1) {
             return;
         }
 
-        const targetChannel = guild.channels.cache.get(settings.voiceChannelId);
-        let isVoiceChannel = false;
-        if (targetChannel) {
-            if (typeof targetChannel.isVoiceBased === 'function') {
-                if (targetChannel.isVoiceBased()) {
-                    isVoiceChannel = true;
-                }
-            }
-        }
-        if (!isVoiceChannel) {
-            setGuildSettings(guildId, { is247: false });
-            clearRejoinStability(guildId);
-            rejoinFailCounts.delete(guildId);
-            console.warn('[247] Rejoin disabled: guildId=' + guildId + ' channelId=' + settings.voiceChannelId + ' attempt=' + attempt + ' reason=voice_channel_missing_or_invalid');
-            return;
-        }
-
-        let me = guild.members.me;
-        if (!me) {
-            if (_client.user) {
-                me = guild.members.cache.get(_client.user.id);
-            }
-        }
-        let canJoin = true;
-        if (me) {
-            const perms = targetChannel.permissionsFor(me);
-            if (perms) {
-                if (!perms.has('ViewChannel')) canJoin = false;
-                if (!perms.has('Connect')) canJoin = false;
-            }
-        }
-        if (!canJoin) {
-            setGuildSettings(guildId, { is247: false });
-            clearRejoinStability(guildId);
-            rejoinFailCounts.delete(guildId);
-            console.warn('[247] Rejoin disabled: guildId=' + guildId + ' channelId=' + settings.voiceChannelId + ' attempt=' + attempt + ' reason=missing_voice_permissions');
-            return;
-        }
-
-        console.log('[247] Rejoin attempt: guildId=' + guildId + ' channelId=' + settings.voiceChannelId + ' attempt=' + attempt + '/' + MAX_REJOIN_ATTEMPTS + ' delayMs=' + delayMs);
+        console.log(`[247] Rejoin attempt ${attempt}/${MAX_REJOIN_ATTEMPTS} for guild ${guildId} (delay was ${delayMs}ms)`);
         try {
-            let textChannel = null;
-            if (settings.musicChannelId) {
-                textChannel = guild.channels.cache.get(settings.musicChannelId);
-            }
+            const textChannel = settings.musicChannelId
+                ? guild.channels.cache.get(settings.musicChannelId)
+                : null;
             await createGuildPlayer({
                 guildId,
                 voiceChannelId: settings.voiceChannelId,
                 shardId: guild.shardId,
-                textChannel,
+                textChannel: textChannel || null,
                 shoukaku: _shoukaku,
             });
             await playNext(guildId, { silent: true });
             armRejoinStabilityReset(guildId);
-            console.log('[247] Rejoin success: guildId=' + guildId + ' channelId=' + settings.voiceChannelId + ' attempt=' + attempt);
+            console.log(`[247] Rejoined voice channel in guild ${guildId} after ${attempt} attempt(s)`);
         } catch (err) {
-            let reason = 'unknown_error';
-            if (err) {
-                if (err.message) reason = err.message;
-            }
             rejoinFailCounts.set(guildId, attempt);
-
-            if (/operation was aborted/i.test(reason)) {
-                setGuildSettings(guildId, { is247: false });
-                clearRejoinStability(guildId);
-                rejoinFailCounts.delete(guildId);
-                console.warn('[247] Rejoin disabled: guildId=' + guildId + ' channelId=' + settings.voiceChannelId + ' attempt=' + attempt + ' reason=operation_aborted');
-                return;
-            }
-
-            if (attempt >= MAX_REJOIN_ATTEMPTS) {
-                setGuildSettings(guildId, { is247: false });
-                clearRejoinStability(guildId);
-                rejoinFailCounts.delete(guildId);
-                console.warn('[247] Rejoin disabled after failures: guildId=' + guildId + ' channelId=' + settings.voiceChannelId + ' attempt=' + attempt + ' reason=' + reason);
-                return;
-            }
-
-            console.warn('[247] Rejoin failed: guildId=' + guildId + ' channelId=' + settings.voiceChannelId + ' attempt=' + attempt + '/' + MAX_REJOIN_ATTEMPTS + ' reason=' + reason);
+            console.warn(`[247] Rejoin attempt ${attempt}/${MAX_REJOIN_ATTEMPTS} failed for guild ${guildId}: ${err.message}`);
             scheduleRejoin(guildId, Math.min(delayMs * 2, 60_000), attempt + 1);
         }
     }, delayMs);
@@ -786,6 +714,12 @@ async function createGuildPlayer({ guildId, voiceChannelId, shardId, textChannel
             clearRejoinStability(guildId);
             // Don't stack multiple rejoin timers — if one is already pending, skip.
             if (rejoinTimeouts.has(guildId)) return;
+            // Re-check DB to avoid scheduling rejoin based on stale in-memory state.
+            const freshSettings = getGuildSettings(guildId);
+            if (!freshSettings.is247) {
+                console.log(`[247] Rejoin skipped because 24/7 is disabled for guild ${guildId}`);
+                return;
+            }
             const failures = (rejoinFailCounts.get(guildId) || 0) + 1;
             rejoinFailCounts.set(guildId, failures);
             const nextDelay = Math.min(10_000 * Math.pow(2, Math.max(0, failures - 1)), 60_000);
