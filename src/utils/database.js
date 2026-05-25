@@ -39,6 +39,7 @@ for (const col of [
     'ALTER TABLE guild_settings ADD COLUMN music_channel_id TEXT',
     'ALTER TABLE guild_settings ADD COLUMN music_panel_msg_id TEXT',
     'ALTER TABLE guild_settings ADD COLUMN voice_channel_id TEXT',
+    'ALTER TABLE guild_settings ADD COLUMN log_channel_id TEXT',
 ]) {
     try { db.exec(col); } catch { /* already exists */ }
 }

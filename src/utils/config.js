@@ -10,17 +10,18 @@ const DEFAULT_GUILD_SETTINGS = {
     musicChannelId: null,
     musicPanelMsgId: null,
     voiceChannelId: null,
+    logChannelId: null,
 };
 
 const getStmt = db.prepare(`
-SELECT guild_id, dj_role_id, is_247, volume, music_channel_id, music_panel_msg_id, voice_channel_id
+SELECT guild_id, dj_role_id, is_247, volume, music_channel_id, music_panel_msg_id, voice_channel_id, log_channel_id
 FROM guild_settings
 WHERE guild_id = ?
 `);
 
 const upsertStmt = db.prepare(`
-INSERT INTO guild_settings (guild_id, dj_role_id, is_247, volume, music_channel_id, music_panel_msg_id, voice_channel_id, updated_at)
-VALUES (@guild_id, @dj_role_id, @is_247, @volume, @music_channel_id, @music_panel_msg_id, @voice_channel_id, CURRENT_TIMESTAMP)
+INSERT INTO guild_settings (guild_id, dj_role_id, is_247, volume, music_channel_id, music_panel_msg_id, voice_channel_id, log_channel_id, updated_at)
+VALUES (@guild_id, @dj_role_id, @is_247, @volume, @music_channel_id, @music_panel_msg_id, @voice_channel_id, @log_channel_id, CURRENT_TIMESTAMP)
 ON CONFLICT(guild_id) DO UPDATE SET
     dj_role_id = excluded.dj_role_id,
     is_247 = excluded.is_247,
@@ -28,6 +29,7 @@ ON CONFLICT(guild_id) DO UPDATE SET
     music_channel_id = excluded.music_channel_id,
     music_panel_msg_id = excluded.music_panel_msg_id,
     voice_channel_id = excluded.voice_channel_id,
+    log_channel_id = excluded.log_channel_id,
     updated_at = CURRENT_TIMESTAMP
 `);
 
@@ -73,6 +75,7 @@ function getGuildSettings(guildId) {
         musicChannelId: row.music_channel_id || null,
         musicPanelMsgId: row.music_panel_msg_id || null,
         voiceChannelId: row.voice_channel_id || null,
+        logChannelId: row.log_channel_id || null,
     };
 }
 
@@ -88,6 +91,7 @@ function setGuildSettings(guildId, update) {
         music_channel_id: merged.musicChannelId || null,
         music_panel_msg_id: merged.musicPanelMsgId || null,
         voice_channel_id: merged.voiceChannelId || null,
+        log_channel_id: merged.logChannelId || null,
     });
 }
 

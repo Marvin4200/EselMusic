@@ -1,8 +1,8 @@
 const { formatDuration } = require('./formatDuration');
-const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { getGuildSettings, setGuildSettings, recordPlay, getLastPlayedSong } = require('./config');
 const { buildBrandPayload } = require('./brandAssets');
 const { updateMusicPanel } = require('./musicPanel');
+const { logEvent } = require('./musicLogger');
 
 /** @type {import('discord.js').Client|null} */
 let _client = null;
@@ -169,6 +169,12 @@ function scheduleRejoin(guildId, delayMs = 10_000, attempt = 1) {
     if (attempt > MAX_REJOIN_ATTEMPTS) {
         // Never disable 24/7 — reset counter and keep retrying at 60s intervals
         console.warn(`[247] Soft cap (${MAX_REJOIN_ATTEMPTS}) reached for guild ${guildId}. Resetting counter, retrying at 60s intervals.`);
+        if (_client) {
+            logEvent(_client, guildId, 'rejoin_disabled', {
+                reason: `Soft cap (${MAX_REJOIN_ATTEMPTS} Versuche) erreicht. Neuer Versuch in 60s.`,
+                is247: true,
+            }).catch(() => { });
+        }
         rejoinFailCounts.set(guildId, 0);
         scheduleRejoin(guildId, 60_000, 1);
         return;
@@ -220,6 +226,13 @@ function scheduleRejoin(guildId, delayMs = 10_000, attempt = 1) {
         } catch (err) {
             rejoinFailCounts.set(guildId, attempt);
             console.warn(`[247] Rejoin attempt ${attempt}/${MAX_REJOIN_ATTEMPTS} failed for guild ${guildId}: ${err.message}`);
+            // Only log to Discord on the last attempt before soft-cap to avoid spam
+            if (attempt === MAX_REJOIN_ATTEMPTS && _client) {
+                logEvent(_client, guildId, 'rejoin_failed', {
+                    reason: `${attempt}/${MAX_REJOIN_ATTEMPTS} Versuche fehlgeschlagen: ${err.message?.slice(0, 120) || 'Unbekannt'}`,
+                    is247: true,
+                }).catch(() => { });
+            }
             scheduleRejoin(guildId, Math.min(delayMs * 2, 60_000), attempt + 1);
         }
     }, delayMs);
@@ -457,14 +470,6 @@ function buildNowPlayingEmbed(track) {
     };
 }
 
-function buildPlayerControlsRow() {
-    return new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('music:pause').setLabel('Pause/Resume').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('music:skip').setLabel('Skip').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('music:shuffle').setLabel('Shuffle').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('music:stop').setLabel('Stop').setStyle(ButtonStyle.Danger),
-    );
-}
 
 async function applyPlayerVolume(player, level) {
     if (typeof player.setGlobalVolume === 'function') {
@@ -518,7 +523,7 @@ async function tryRecoverTrack(guildId, state, shoukaku) {
             if (_client) updateMusicPanel(_client, guildId, state).catch(() => { });
             sendTemp(state.textChannel, {
                 ...buildBrandPayload(buildNowPlayingEmbed(recovered), { includeBanner: true }),
-                components: [buildPlayerControlsRow()],
+                components: [],
             });
             return true;
         } catch {
@@ -588,6 +593,20 @@ async function playNext(guildId, { silent = false } = {}) {
         await state.player.playTrack({ track: { encoded: next.encoded } });
         recordPlay(guildId, next.info);
         addRecentUri(guildId, next.info?.uri, next.info?.author);
+
+        // Log track_started — throttled per 24/7 mode to avoid AutoMix spam
+        if (_client && next.info?.title) {
+            const logFields = {
+                trackTitle: next.info.title,
+                is247: state.is247,
+            };
+            // Only include URI for non-247 (explicit user plays); in 24/7 it's AutoMix noise
+            if (!state.is247 && next.info?.uri) {
+                logFields.trackUri = next.info.uri;
+            }
+            logEvent(_client, guildId, 'track_started', logFields).catch(() => { });
+        }
+
         startPanelRefresh(guildId);
         if (_client) updateMusicPanel(_client, guildId, state).catch(() => { });
 
@@ -761,7 +780,6 @@ module.exports = {
     scheduleRejoin,
     triggerPanelUpdate,
     buildNowPlayingEmbed,
-    buildPlayerControlsRow,
     applyPlayerVolume,
     setDiscordClient,
     setShoukaku,

@@ -2,7 +2,7 @@
  * Music Channel Panel — one persistent embed that always shows
  * what's currently playing. Updated whenever the track changes.
  */
-const { AttachmentBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { AttachmentBuilder } = require('discord.js');
 const path = require('path');
 const fs = require('fs');
 const { getGuildSettings, setGuildSettings } = require('./config');
@@ -11,14 +11,6 @@ const { formatDuration } = require('./formatDuration');
 const LOGO_PATH = path.join(__dirname, '../../eselmusic.png');
 const BANNER_PATH = path.join(__dirname, '../../eselmusicbanner.png');
 
-function buildPanelControlsRow() {
-    return new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('music:pause').setLabel('⏸ Pause').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('music:skip').setLabel('⏭ Skip').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('music:shuffle').setLabel('🔀 Shuffle').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('music:stop').setLabel('⏹ Stop').setStyle(ButtonStyle.Danger),
-    );
-}
 
 function buildIdleEmbed() {
     const files = [];
@@ -45,8 +37,34 @@ function buildIdleEmbed() {
 
     return {
         embeds: [embed],
-        components: [buildPanelControlsRow()],
+        components: [],
         files,
+    };
+}
+
+function buildQueueEmbed(queue) {
+    const count = queue?.length || 0;
+
+    if (count === 0) {
+        return {
+            color: 0x2B2D31,
+            title: '📋 Queue',
+            description: '*— Leer —*',
+        };
+    }
+
+    const MAX = 15;
+    const lines = (queue || []).slice(0, MAX).map((t, i) => {
+        const title = String(t?.info?.title || 'Unknown').slice(0, 50);
+        const author = String(t?.info?.author || '').slice(0, 28);
+        return `\`${String(i + 1).padStart(2, ' ')}.\` **${title}**${author ? ` — ${author}` : ''}`;
+    });
+    if (count > MAX) lines.push(`*…+${count - MAX} weitere Tracks*`);
+
+    return {
+        color: 0x2B2D31,
+        title: `📋 Queue — ${count} Track${count !== 1 ? 's' : ''}`,
+        description: lines.join('\n'),
     };
 }
 
@@ -73,7 +91,6 @@ function buildTrackEmbed(track, state) {
             { name: '⏱ Dauer', value: duration, inline: true },
             { name: '🔁 Loop', value: state.loop || 'none', inline: true },
             { name: '🔊 Volume', value: `${state.volume}%`, inline: true },
-            { name: '📋 Queue', value: `${state.queue?.length || 0} Track(s)`, inline: true },
             { name: '🌙 24/7', value: state.is247 ? '✅ An' : '❌ Aus', inline: true },
         ],
         ...(thumbnail ? { thumbnail: { url: thumbnail } } : {}),
@@ -91,8 +108,8 @@ function buildTrackEmbed(track, state) {
     }
 
     return {
-        embeds: [embed],
-        components: [buildPanelControlsRow()],
+        embeds: [embed, buildQueueEmbed(state.queue)],
+        components: [],
         files,
     };
 }

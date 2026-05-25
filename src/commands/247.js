@@ -1,6 +1,7 @@
-const { SlashCommandBuilder } = require('discord.js');
+const { SlashCommandBuilder, MessageFlags } = require('discord.js');
 const { players, createGuildPlayer, playNext } = require('../utils/playerManager');
 const { getGuildSettings, setGuildSettings } = require('../utils/config');
+const { logEvent } = require('../utils/musicLogger');
 
 const IGNORED_INTERACTION_CODES = new Set([10062, 40060]);
 
@@ -32,7 +33,7 @@ module.exports = {
     async execute(interaction, { shoukaku }) {
         if (!interaction.deferred && !interaction.replied) {
             try {
-                await interaction.deferReply({ ephemeral: true });
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
             } catch (error) {
                 if (isIgnoredInteractionError(error)) {
                     console.warn('[Interaction] Ignored expired/already acknowledged interaction for /247');
@@ -56,6 +57,13 @@ module.exports = {
 
         // Always persist to DB
         setGuildSettings(interaction.guildId, { is247: new247 });
+
+        // Log the toggle to the guild's configured log channel
+        const logEventName = new247 ? 'twentyfourseven_enabled' : 'twentyfourseven_disabled';
+        logEvent(interaction.client, interaction.guildId, logEventName, {
+            userId: interaction.user.id,
+            channelId: interaction.channelId,
+        }).catch(() => { });
 
         const icon = new247 ? '🟢' : '🔴';
         const statusText = new247 ? 'aktiviert' : 'deaktiviert';
