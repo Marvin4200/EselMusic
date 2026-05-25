@@ -161,7 +161,7 @@ client.once('clientReady', async () => {
                 });
                 await playNext(row.guild_id, { silent: true });
                 textChannel?.send({ embeds: [{ color: 0x5865F2, description: '🔁 **24/7 Modus** — Bot ist dem Channel nach Neustart wieder beigetreten.' }] })
-                    .then(m => setTimeout(() => m.delete().catch(() => {}), 10_000))
+                    .then(m => setTimeout(() => m.delete().catch(() => { }), 10_000))
                     .catch(() => { });
                 console.log(`[247] Rejoined voice channel ${row.voice_channel_id} in guild ${row.guild_id}`);
             } catch (err) {
@@ -195,7 +195,7 @@ client.on('interactionCreate', async (interaction) => {
                 description: '⚠️ EselMusic läuft jetzt im 24/7 Music-Channel-Modus. Schreibe einfach einen Songnamen oder Link in den Musik-Channel.'
             }],
             flags: [64],
-        }).catch(() => {});
+        }).catch(() => { });
     }
 
     if (!interaction.isChatInputCommand()) return;
@@ -329,16 +329,15 @@ client.on('messageCreate', async (message) => {
             return;
         }
 
-        state.queue.push(track);
+        state.queue.unshift(track);
 
-        const position = state.current ? state.queue.length : 1;
+        const position = 1;
         const durLabel = track.info.isStream ? 'LIVE 🔴' : formatDuration(track.info.length);
         const addedMsg = await message.channel.send({
             embeds: [{
                 color: 0x5865F2,
                 description: state.current
-                    ? `➕ **${track.info.title}** zur Queue hinzugefügt (Position #${position})`
-                    : `▶️ **${track.info.title}** wird jetzt gespielt`,
+                    ? `➕ **${track.info.title}** als nächster Track hinzugefügt` : `▶️ **${track.info.title}** wird jetzt gespielt`,
                 footer: { text: `${track.info.author || 'Unknown'} • ${durLabel} • von ${message.author.username}` },
             }],
         });
@@ -386,7 +385,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 
     destroyPlayer(oldState.guild.id, shoukaku);
     state.textChannel?.send({ embeds: [{ color: 0x5865F2, description: '👋 Left voice channel (everyone left).' }] })
-        .then(m => setTimeout(() => m.delete().catch(() => {}), 10_000))
+        .then(m => setTimeout(() => m.delete().catch(() => { }), 10_000))
         .catch(() => { });
 });
 
