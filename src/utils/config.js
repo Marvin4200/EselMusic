@@ -146,6 +146,52 @@ const topArtistsStmt = db.prepare(`
     LIMIT ?
 `);
 
+// ── Wochenrueckblick ────────────────────────────────────────────────────────
+// Arbeitet auf play_history, nicht auf den Zaehlern: gefragt ist, was in
+// einem Zeitraum lief, nicht was insgesamt am haeufigsten lief.
+const weeklyTracksStmt = db.prepare(`
+    SELECT title, author, COUNT(*) AS plays
+    FROM play_history
+    WHERE played_at >= datetime('now', ?)
+    GROUP BY title, author
+    ORDER BY plays DESC
+    LIMIT ?
+`);
+
+const weeklyRequestersStmt = db.prepare(`
+    SELECT requested_by AS user_id, COUNT(*) AS plays
+    FROM play_history
+    WHERE played_at >= datetime('now', ?) AND requested_by IS NOT NULL
+    GROUP BY requested_by
+    ORDER BY plays DESC
+    LIMIT ?
+`);
+
+const weeklyTotalsStmt = db.prepare(`
+    SELECT COUNT(*) AS plays,
+           COUNT(DISTINCT track_uri) AS tracks,
+           SUM(CASE WHEN requested_by IS NULL THEN 1 ELSE 0 END) AS automix
+    FROM play_history
+    WHERE played_at >= datetime('now', ?)
+`);
+
+/**
+ * @param {number} days  Zeitfenster in Tagen (Standard 7).
+ */
+function getRecap(days = 7) {
+    const span = `-${Math.max(1, Math.min(365, Number(days) || 7))} days`;
+    try {
+        return {
+            days: Number(days) || 7,
+            totals: weeklyTotalsStmt.get(span) || { plays: 0, tracks: 0, automix: 0 },
+            tracks: weeklyTracksStmt.all(span, 5),
+            requesters: weeklyRequestersStmt.all(span, 5),
+        };
+    } catch {
+        return { days: Number(days) || 7, totals: { plays: 0, tracks: 0, automix: 0 }, tracks: [], requesters: [] };
+    }
+}
+
 function getTopArtists(limit = 10) {
     try {
         return topArtistsStmt.all(limit);
@@ -188,4 +234,4 @@ function getAllIs247Guilds() {
     return getAllIs247Stmt.all();
 }
 
-module.exports = { getGuildSettings, setGuildSettings, DEFAULT_GUILD_SETTINGS, recordPlay, getTopSongs, getTopArtists, getAllIs247Guilds, getLastPlayedSong };
+module.exports = { getGuildSettings, setGuildSettings, DEFAULT_GUILD_SETTINGS, recordPlay, getTopSongs, getTopArtists, getRecap, getAllIs247Guilds, getLastPlayedSong };

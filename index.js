@@ -593,6 +593,13 @@ app.get('/api/public-charts', (req, res) => {
     res.json({ charts: rows.map((r, i) => ({ rank: i + 1, title: r.title, author: r.author, plays: Number(r.plays) })) });
 });
 
+// ── GET /api/public-recap — no auth, plays within a time window ──────────────
+app.get('/api/public-recap', (req, res) => {
+    const { getRecap } = require('./src/utils/config');
+    const days = Number(req.query.days) || 7;
+    res.json(getRecap(days));
+});
+
 // ── GET /api/public-artists — no auth, global top artists by total plays ──────
 app.get('/api/public-artists', (req, res) => {
     const { getTopArtists } = require('./src/utils/config');

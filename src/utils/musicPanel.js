@@ -92,6 +92,11 @@ function buildTrackEmbed(track, state) {
             { name: '🔁 Loop', value: state.loop || 'none', inline: true },
             { name: '🔊 Volume', value: `${state.volume}%`, inline: true },
             { name: '🌙 24/7', value: state.is247 ? '✅ An' : '❌ Aus', inline: true },
+            // AutoMix-Tracks hat niemand angefragt - dann bleibt das Feld weg,
+            // statt eine leere Zeile ins Embed zu setzen.
+            ...(track.requestedBy
+                ? [{ name: '🙋 Angefragt von', value: `<@${track.requestedBy}>`, inline: true }]
+                : []),
         ],
         ...(thumbnail ? { thumbnail: { url: thumbnail } } : {}),
     };
