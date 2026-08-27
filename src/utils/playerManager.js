@@ -814,6 +814,11 @@ async function createGuildPlayer({ guildId, voiceChannelId, shardId, textChannel
             players.delete(guildId);
             return;
         }
+        // 'loadFailed' wird schon vom 'exception'-Handler behandelt (Recovery
+        // + playNext). Hier zusätzlich playNext() aufzurufen führt zu zwei
+        // parallelen Vorspul-Versuchen für denselben Fehlschlag — Panel und
+        // tatsächlich hörbarer Track laufen dann auseinander.
+        if (data.reason === 'loadFailed') return;
         await playNext(guildId);
     });
 
