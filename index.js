@@ -733,6 +733,6 @@ app.post('/api/guild/:id/settings', apiAuth, (req, res) => {
     });
 });
 
-app.listen(3020, () => console.log('[musikbot] Health + API endpoint running on port 3020'));
+app.listen(3020, () => console.log('[musikbot] Health + API endpoint running on port 3020 (auto-deploy test)'));
 
 client.login(process.env.DISCORD_TOKEN);
