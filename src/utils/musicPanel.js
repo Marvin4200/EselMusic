@@ -135,7 +135,7 @@ function buildTrackEmbed(track, state) {
  * @param {string} guildId
  * @param {object|null} state - PlayerState or null when idle
  */
-async function updateMusicPanel(client, guildId, state) {
+async function doUpdateMusicPanel(client, guildId, state) {
     const settings = getGuildSettings(guildId);
     if (!settings.musicChannelId) return;
 
@@ -164,7 +164,7 @@ async function updateMusicPanel(client, guildId, state) {
             if (code === 10008 /* Unknown Message */ || code === 50001 /* Missing Access */) {
                 setGuildSettings(guildId, { musicPanelMsgId: null });
             } else {
-                // Transient error — don't create a new message, just skip
+                console.error('[MusicPanel] Edit failed:', err?.message);
                 return;
             }
         }
@@ -177,6 +177,36 @@ async function updateMusicPanel(client, guildId, state) {
             setGuildSettings(guildId, { musicPanelMsgId: msg.id });
         } catch (err) {
             console.error('[MusicPanel] Failed to send panel:', err?.message);
+        }
+    }
+}
+
+/**
+ * Panel updates fire from several places in quick succession (track start,
+ * recovery, 15s refresh tick). Each one is its own async fetch+edit, so
+ * without serialization two overlapping updates can land at Discord out of
+ * order — the slower one (built from an already-stale `state.current`)
+ * would then overwrite the correct panel. This queues per guild: only one
+ * update in flight at a time, and any updates requested meanwhile collapse
+ * into a single trailing re-render that reads the (by then current) state.
+ */
+const inFlight = new Set();
+const pendingRerun = new Map();
+
+async function updateMusicPanel(client, guildId, state) {
+    if (inFlight.has(guildId)) {
+        pendingRerun.set(guildId, { client, guildId, state });
+        return;
+    }
+    inFlight.add(guildId);
+    try {
+        await doUpdateMusicPanel(client, guildId, state);
+    } finally {
+        inFlight.delete(guildId);
+        const pending = pendingRerun.get(guildId);
+        if (pending) {
+            pendingRerun.delete(guildId);
+            updateMusicPanel(pending.client, pending.guildId, pending.state).catch(() => {});
         }
     }
 }
