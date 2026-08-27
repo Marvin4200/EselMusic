@@ -105,16 +105,53 @@ const recordPlayStmt = db.prepare(`
         last_played = CURRENT_TIMESTAMP
 `);
 
-function recordPlay(guildId, trackInfo) {
+const recordHistoryStmt = db.prepare(`
+    INSERT INTO play_history (guild_id, track_uri, title, author, requested_by)
+    VALUES (@guild_id, @track_uri, @title, @author, @requested_by)
+`);
+
+/**
+ * @param {string} guildId
+ * @param {object} trackInfo   Lavalink track.info
+ * @param {string|null} requestedBy  Discord user id, or null when the bot
+ *                                   queued the track itself (AutoMix / 24-7).
+ */
+function recordPlay(guildId, trackInfo, requestedBy = null) {
     if (!trackInfo?.uri || trackInfo.isStream) return; // skip radio streams
+    const row = {
+        guild_id: String(guildId),
+        track_uri: trackInfo.uri,
+        title: (trackInfo.title || 'Unknown').slice(0, 255),
+        author: (trackInfo.author || '').slice(0, 255),
+    };
     try {
-        recordPlayStmt.run({
-            guild_id: String(guildId),
-            track_uri: trackInfo.uri,
-            title: (trackInfo.title || 'Unknown').slice(0, 255),
-            author: (trackInfo.author || '').slice(0, 255),
-        });
+        recordPlayStmt.run(row);
     } catch { /* non-critical */ }
+    // Separate try: a failing history write must never cost us the counter.
+    try {
+        recordHistoryStmt.run({ ...row, requested_by: requestedBy ? String(requestedBy) : null });
+    } catch { /* non-critical */ }
+}
+
+// Aggregates the per-track counters by artist. Works on the existing data,
+// no history required.
+const topArtistsStmt = db.prepare(`
+    SELECT author,
+           SUM(play_count) AS plays,
+           COUNT(*)        AS tracks
+    FROM song_stats
+    WHERE author <> ''
+    GROUP BY author
+    ORDER BY plays DESC
+    LIMIT ?
+`);
+
+function getTopArtists(limit = 10) {
+    try {
+        return topArtistsStmt.all(limit);
+    } catch {
+        return [];
+    }
 }
 
 const topSongsStmt = db.prepare(`
@@ -151,4 +188,4 @@ function getAllIs247Guilds() {
     return getAllIs247Stmt.all();
 }
 
-module.exports = { getGuildSettings, setGuildSettings, DEFAULT_GUILD_SETTINGS, recordPlay, getTopSongs, getAllIs247Guilds, getLastPlayedSong };
+module.exports = { getGuildSettings, setGuildSettings, DEFAULT_GUILD_SETTINGS, recordPlay, getTopSongs, getTopArtists, getAllIs247Guilds, getLastPlayedSong };

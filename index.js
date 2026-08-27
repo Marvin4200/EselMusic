@@ -442,7 +442,12 @@ client.on('messageCreate', async (message) => {
             const tracks = resolved.data?.tracks || [];
             track = tracks[0] || null;
             // Rest der Playlist hinten anhängen, der erste Track kommt gleich nach vorne.
-            if (tracks.length > 1) state.queue.push(...tracks.slice(1));
+            // Wer den Song angefragt hat, wird an den Track geheftet und beim
+            // Abspielen in die Historie geschrieben.
+            if (tracks.length > 1) {
+                for (const t of tracks.slice(1)) t.requestedBy = message.author.id;
+                state.queue.push(...tracks.slice(1));
+            }
         }
         if (!track) {
             const warn = await message.channel.send({ embeds: [{ color: 0xFEE75C, description: `⚠️ Keine Ergebnisse für: **${query}**` }] });
@@ -450,6 +455,7 @@ client.on('messageCreate', async (message) => {
             return;
         }
 
+        track.requestedBy = message.author.id;
         state.queue.unshift(track);
 
         const position = 1;
@@ -585,6 +591,20 @@ app.get('/api/public-charts', (req, res) => {
         'SELECT title, author, SUM(play_count) AS plays FROM song_stats GROUP BY title, author ORDER BY plays DESC LIMIT 10'
     ).all();
     res.json({ charts: rows.map((r, i) => ({ rank: i + 1, title: r.title, author: r.author, plays: Number(r.plays) })) });
+});
+
+// ── GET /api/public-artists — no auth, global top artists by total plays ──────
+app.get('/api/public-artists', (req, res) => {
+    const { getTopArtists } = require('./src/utils/config');
+    const rows = getTopArtists(10);
+    res.json({
+        artists: rows.map((r, i) => ({
+            rank: i + 1,
+            author: r.author,
+            plays: Number(r.plays),
+            tracks: Number(r.tracks),
+        })),
+    });
 });
 
 // ── GET /api/status ───────────────────────────────────────────────────────────

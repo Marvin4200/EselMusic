@@ -701,7 +701,7 @@ async function playNext(guildId, { silent = false } = {}) {
     try {
         clearAutomixRetry(guildId);
         await state.player.playTrack({ track: { encoded: next.encoded } });
-        recordPlay(guildId, next.info);
+        recordPlay(guildId, next.info, next.requestedBy || null);
         addRecentUri(guildId, next.info?.uri, next.info?.author);
 
         startPanelRefresh(guildId);
