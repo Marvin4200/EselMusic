@@ -2,7 +2,7 @@
  * Music Channel Panel — one persistent embed that always shows
  * what's currently playing. Updated whenever the track changes.
  */
-const { AttachmentBuilder } = require('discord.js');
+const { AttachmentBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const path = require('path');
 const fs = require('fs');
 const { getGuildSettings, setGuildSettings } = require('./config');
@@ -107,9 +107,24 @@ function buildTrackEmbed(track, state) {
         embed.image = { url: 'attachment://eselmusicbanner.png' };
     }
 
+    const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId('panel:vol_down')
+            .setEmoji('🔉')
+            .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+            .setCustomId('panel:skip')
+            .setEmoji('⏭')
+            .setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
+            .setCustomId('panel:vol_up')
+            .setEmoji('🔊')
+            .setStyle(ButtonStyle.Secondary),
+    );
+
     return {
         embeds: [embed, buildQueueEmbed(state.queue)],
-        components: [],
+        components: [row],
         files,
     };
 }
@@ -136,30 +151,33 @@ async function updateMusicPanel(client, guildId, state) {
         ? buildTrackEmbed(state.current, state)
         : buildIdleEmbed();
 
-    // Try to edit the existing panel message.
+    // Try to edit the existing panel message
+    let edited = false;
     if (settings.musicPanelMsgId) {
         try {
             const existing = await channel.messages.fetch(settings.musicPanelMsgId);
             await existing.edit(payload);
+            edited = true;
             return;
         } catch (err) {
-            // Message deleted or inaccessible — clear stored ID and send a fresh one.
             const code = err?.code ?? err?.rawError?.code;
             if (code === 10008 /* Unknown Message */ || code === 50001 /* Missing Access */) {
                 setGuildSettings(guildId, { musicPanelMsgId: null });
             } else {
-                // Transient error (rate-limit, network) — don't resend, just skip this cycle.
+                // Transient error — don't create a new message, just skip
                 return;
             }
         }
     }
 
-    // Send a new panel message and remember its ID.
-    try {
-        const msg = await channel.send(payload);
-        setGuildSettings(guildId, { musicPanelMsgId: msg.id });
-    } catch (err) {
-        console.error('[MusicPanel] Failed to send panel:', err?.message);
+    // Only send a new message if we couldn't edit an existing one
+    if (!edited) {
+        try {
+            const msg = await channel.send(payload);
+            setGuildSettings(guildId, { musicPanelMsgId: msg.id });
+        } catch (err) {
+            console.error('[MusicPanel] Failed to send panel:', err?.message);
+        }
     }
 }
 

@@ -291,7 +291,7 @@ async function getRelatedTrackFor247(guildId) {
             `ytmsearch:${DEUTSCHRAP_HINT} mix`,
         ];
 
-    for (const identifier of identifiers) {
+    for (const identifier of orderedWithFallback(identifiers)) {
         try {
             const resolved = await node.rest.resolve(identifier);
             if (!resolved || resolved.loadType !== 'search' || !Array.isArray(resolved.data) || resolved.data.length === 0) {
@@ -385,11 +385,11 @@ async function getFallbackDeutschrapTrackFor247() {
     const node = _shoukaku.getIdealNode();
     if (!node) return null;
 
-    const fallbackQueries = [
+    const fallbackQueries = orderedWithFallback([
         'ytmsearch:deutschrap mix',
         'ytsearch:deutschrap 2026',
         'ytsearch:german rap playlist',
-    ];
+    ]);
 
     for (const query of fallbackQueries) {
         try {
@@ -454,23 +454,6 @@ const players = new Map();
  * @property {boolean} is247
  */
 
-function buildNowPlayingEmbed(track) {
-    const thumbnail = track.info.artworkUrl
-        || (track.info.identifier ? `https://img.youtube.com/vi/${track.info.identifier}/mqdefault.jpg` : null);
-
-    return {
-        color: 0x5865F2,
-        title: '🎵 Now Playing',
-        description: `**[${track.info.title}](${track.info.uri})**`,
-        fields: [
-            { name: 'Artist', value: track.info.author || 'Unknown', inline: true },
-            { name: 'Duration', value: track.info.isStream ? 'LIVE 🔴' : formatDuration(track.info.length), inline: true },
-        ],
-        ...(thumbnail ? { thumbnail: { url: thumbnail } } : {}),
-    };
-}
-
-
 async function applyPlayerVolume(player, level) {
     if (typeof player.setGlobalVolume === 'function') {
         await player.setGlobalVolume(level);
@@ -485,6 +468,132 @@ async function applyPlayerVolume(player, level) {
         return;
     }
     throw new Error('Volume control is not supported by the current player implementation');
+}
+
+// ── Quellen-Umschalter ──────────────────────────────────────────────────────
+//
+// YouTube fällt regelmäßig aus (SABR, geänderte Player-Skripte, Login-Zwang).
+// Dann schlägt zwar nicht die Suche fehl, wohl aber jedes Abspielen — und der
+// Bot überspringt stumpf die ganze Playlist, obwohl SoundCloud danebensteht
+// und funktioniert.
+//
+// Deshalb zählen wir aufeinanderfolgende YouTube-Abspielfehler. Ab einer
+// Schwelle sucht der Bot bevorzugt auf SoundCloud, bis wieder etwas von
+// YouTube läuft. Kein Neustart nötig, keine Konfiguration — er merkt es selbst.
+const YT_FAILURE_THRESHOLD = 3;
+const YT_COOLDOWN_MS = 15 * 60 * 1000;
+
+const youtubeHealth = { consecutiveFailures: 0, preferAlternateUntil: 0 };
+
+function isYoutubeTrack(track) {
+    const uri = track?.info?.uri || '';
+    const source = (track?.info?.sourceName || '').toLowerCase();
+    return source === 'youtube' || /youtube\.com|youtu\.be/i.test(uri);
+}
+
+/** Nach einem gescheiterten Abspielversuch aufrufen. */
+function noteYoutubeFailure() {
+    youtubeHealth.consecutiveFailures += 1;
+    if (youtubeHealth.consecutiveFailures >= YT_FAILURE_THRESHOLD) {
+        const wasPreferring = youtubeHealth.preferAlternateUntil > Date.now();
+        youtubeHealth.preferAlternateUntil = Date.now() + YT_COOLDOWN_MS;
+        if (!wasPreferring) {
+            console.warn(
+                `[SOURCE] ${youtubeHealth.consecutiveFailures} YouTube-Abspielfehler in Folge — `
+                + `suche die nächsten ${Math.round(YT_COOLDOWN_MS / 60000)} Minuten bevorzugt auf SoundCloud.`
+            );
+        }
+    }
+}
+
+/** Nach einem erfolgreichen YouTube-Abspielversuch aufrufen. */
+function noteYoutubeSuccess() {
+    if (youtubeHealth.consecutiveFailures === 0 && !youtubeHealth.preferAlternateUntil) return;
+    if (youtubeHealth.preferAlternateUntil > Date.now()) {
+        console.log('[SOURCE] YouTube liefert wieder — zurück auf normale Suchreihenfolge.');
+    }
+    youtubeHealth.consecutiveFailures = 0;
+    youtubeHealth.preferAlternateUntil = 0;
+}
+
+/** True, solange YouTube als unzuverlässig gilt. */
+function shouldPreferAlternateSource() {
+    return youtubeHealth.preferAlternateUntil > Date.now();
+}
+
+/**
+ * Suchpräfixe in der Reihenfolge, in der sie probiert werden sollen.
+ * Bei gesundem YouTube wie bisher; sonst SoundCloud zuerst.
+ */
+function searchIdentifiers(query) {
+    const yt = [`ytsearch:${query}`, `ytmsearch:${query}`];
+    const sc = [`scsearch:${query}`];
+    return shouldPreferAlternateSource() ? [...sc, ...yt] : [...yt, ...sc];
+}
+
+/**
+ * Ergänzt eine fertige Liste von YouTube-Identifiern um SoundCloud-Varianten.
+ * Bei gesundem YouTube hängen sie hinten dran (Verhalten wie bisher),
+ * im Ausweichmodus stehen sie vorne.
+ */
+function orderedWithFallback(ytIdentifiers) {
+    const queries = [];
+    for (const id of ytIdentifiers) {
+        const q = String(id).replace(/^(?:ytsearch|ytmsearch):/, '');
+        if (q && !queries.includes(q)) queries.push(q);
+    }
+    const sc = queries.map(q => `scsearch:${q}`);
+    return shouldPreferAlternateSource() ? [...sc, ...ytIdentifiers] : [...ytIdentifiers, ...sc];
+}
+
+// ── Übersprungene Tracks sammeln statt einzeln melden ───────────────────────
+//
+// Vorher schrieb der Bot pro fehlgeschlagenem Track ZWEI Nachrichten in den
+// Channel (eine beim Retry, eine beim Aufgeben). Bei einer Playlist, deren
+// Quelle gerade klemmt, ergibt das eine Wand aus roten Kästen — genau dann,
+// wenn ohnehin niemand Musik hört und die Meldungen niemandem helfen.
+//
+// Jetzt: Der Retry passiert still, und Skips werden gezählt. Erst wenn ein paar
+// Sekunden lang nichts Neues mehr dazukommt, geht EINE Zusammenfassung raus.
+const SKIP_NOTICE_DELAY_MS = 6_000;
+const skipNotices = new Map(); // guildId -> { count, timer }
+
+function noteSkippedTrack(guildId) {
+    const entry = skipNotices.get(guildId) || { count: 0, timer: null };
+    entry.count += 1;
+    if (entry.timer) clearTimeout(entry.timer);
+
+    entry.timer = setTimeout(() => {
+        const pending = skipNotices.get(guildId);
+        skipNotices.delete(guildId);
+        if (!pending?.count) return;
+
+        const state = players.get(guildId);
+        if (!state?.textChannel) return;
+
+        const n = pending.count;
+        const description = n === 1
+            ? '⏭️ Ein Track ließ sich nicht abspielen und wurde übersprungen.'
+            : `⏭️ ${n} Tracks ließen sich nicht abspielen und wurden übersprungen.`;
+
+        sendTemp(state.textChannel, {
+            embeds: [{
+                color: 0xED4245,
+                description: n >= 5
+                    ? `${description}\nWenn das so bleibt, klemmt gerade die Musikquelle.`
+                    : description,
+            }],
+        }, 8_000);
+    }, SKIP_NOTICE_DELAY_MS);
+
+    skipNotices.set(guildId, entry);
+}
+
+/** Aufräumen, wenn ein Player verschwindet — sonst bleiben Timer hängen. */
+function clearSkipNotice(guildId) {
+    const entry = skipNotices.get(guildId);
+    if (entry?.timer) clearTimeout(entry.timer);
+    skipNotices.delete(guildId);
 }
 
 async function tryRecoverTrack(guildId, state, shoukaku) {
@@ -502,7 +611,13 @@ async function tryRecoverTrack(guildId, state, shoukaku) {
     if (!node) return false;
 
     const query = `${failedTrack.info.title} ${failedTrack.info.author || ''}`.trim();
-    const identifiers = [`ytmsearch:${query}`, `ytsearch:${query}`];
+
+    // Wenn ein YouTube-Track gescheitert ist, ist es sinnlos, denselben Song
+    // nochmal bei YouTube zu suchen — die Quelle ist ja das Problem. Also
+    // zuerst SoundCloud, YouTube nur noch als Rückfallebene.
+    const identifiers = isYoutubeTrack(failedTrack)
+        ? [`scsearch:${query}`, `ytmsearch:${query}`, `ytsearch:${query}`]
+        : [`ytmsearch:${query}`, `ytsearch:${query}`, `scsearch:${query}`];
 
     for (const identifier of identifiers) {
         try {
@@ -515,16 +630,11 @@ async function tryRecoverTrack(guildId, state, shoukaku) {
             state.retryCounts.set(key, retries + 1);
             state.current = recovered;
 
-            state.textChannel?.send({
-                embeds: [{ color: 0xFEE75C, description: `⚠️ Playback error on **${failedTrack.info.title}**. Retrying with an alternative source...` }],
-            }).catch(() => { });
+            // Bewusst ohne Nachricht: Der Retry klappt meistens, und wenn nicht,
+            // meldet noteSkippedTrack() das Ergebnis gesammelt.
 
             await state.player.playTrack({ track: { encoded: recovered.encoded } });
             if (_client) updateMusicPanel(_client, guildId, state).catch(() => { });
-            sendTemp(state.textChannel, {
-                ...buildBrandPayload(buildNowPlayingEmbed(recovered), { includeBanner: true }),
-                components: [],
-            });
             return true;
         } catch {
             // Try next fallback identifier
@@ -594,19 +704,6 @@ async function playNext(guildId, { silent = false } = {}) {
         recordPlay(guildId, next.info);
         addRecentUri(guildId, next.info?.uri, next.info?.author);
 
-        // Log track_started — throttled per 24/7 mode to avoid AutoMix spam
-        if (_client && next.info?.title) {
-            const logFields = {
-                trackTitle: next.info.title,
-                is247: state.is247,
-            };
-            // Only include URI for non-247 (explicit user plays); in 24/7 it's AutoMix noise
-            if (!state.is247 && next.info?.uri) {
-                logFields.trackUri = next.info.uri;
-            }
-            logEvent(_client, guildId, 'track_started', logFields).catch(() => { });
-        }
-
         startPanelRefresh(guildId);
         if (_client) updateMusicPanel(_client, guildId, state).catch(() => { });
 
@@ -616,7 +713,7 @@ async function playNext(guildId, { silent = false } = {}) {
         }
     } catch (err) {
         console.error('[PLAYER_001] playNext error:', err);
-        sendTemp(state.textChannel, { embeds: [{ color: 0xED4245, description: '❌ Failed to play track, skipping...' }] });
+        noteSkippedTrack(guildId);
         await playNext(guildId);
     }
 }
@@ -704,9 +801,16 @@ async function createGuildPlayer({ guildId, voiceChannelId, shardId, textChannel
         console.warn('[PLAYER_002] Failed to apply initial volume:', err?.message || err);
     }
 
+    player.on('start', () => {
+        // Ein Track, der tatsächlich anfängt zu spielen, setzt den Fehlerzähler
+        // zurück — sonst bliebe der Bot für immer im SoundCloud-Modus.
+        if (isYoutubeTrack(state.current)) noteYoutubeSuccess();
+    });
+
     player.on('end', async (data) => {
         if (data.reason === 'replaced') return;
         if (data.reason === 'cleanup') {
+            clearSkipNotice(guildId);
             players.delete(guildId);
             return;
         }
@@ -717,10 +821,12 @@ async function createGuildPlayer({ guildId, voiceChannelId, shardId, textChannel
         if (!players.has(guildId)) return;
         console.error(`[PLAYER_003] Exception in guild ${guildId}:`, error?.message || error);
 
+        if (isYoutubeTrack(state.current)) noteYoutubeFailure();
+
         const recovered = await tryRecoverTrack(guildId, state, shoukaku);
         if (recovered) return;
 
-        state.textChannel?.send({ embeds: [{ color: 0xED4245, description: '❌ Track error, skipping...' }] }).catch(() => { });
+        noteSkippedTrack(guildId);
         await playNext(guildId);
     });
 
@@ -728,11 +834,23 @@ async function createGuildPlayer({ guildId, voiceChannelId, shardId, textChannel
         // If createGuildPlayer is actively replacing this connection, ignore — it will set up the new player.
         if (replacingGuilds.has(guildId)) return;
         const wasIs247 = state.is247;
+        clearSkipNotice(guildId);
         players.delete(guildId);
         if (wasIs247) {
             clearRejoinStability(guildId);
             // Don't stack multiple rejoin timers — if one is already pending, skip.
             if (rejoinTimeouts.has(guildId)) return;
+
+            // If the bot is still in a voice channel right now, it was moved (not kicked).
+            // Update the stored channel and rejoin immediately (no backoff needed).
+            const guild = _client?.guilds.cache.get(guildId);
+            const currentChannelId = guild?.members?.me?.voice?.channelId;
+            if (currentChannelId) {
+                setGuildSettings(guildId, { voiceChannelId: currentChannelId });
+                scheduleRejoin(guildId, 1_000, 0);
+                return;
+            }
+
             // Re-check DB to avoid scheduling rejoin based on stale in-memory state.
             const freshSettings = getGuildSettings(guildId);
             if (!freshSettings.is247) {
@@ -774,12 +892,14 @@ function triggerPanelUpdate(guildId) {
 
 module.exports = {
     players,
+    searchIdentifiers,
+    orderedWithFallback,
+    shouldPreferAlternateSource,
     createGuildPlayer,
     playNext,
     destroyPlayer,
     scheduleRejoin,
     triggerPanelUpdate,
-    buildNowPlayingEmbed,
     applyPlayerVolume,
     setDiscordClient,
     setShoukaku,

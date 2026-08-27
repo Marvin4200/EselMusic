@@ -1,16 +1,48 @@
 require('dotenv').config();
 const express = require('express');
-const { Client, GatewayIntentBits, Collection, REST, Routes } = require('discord.js');
+const https = require('https');
+const { Client, GatewayIntentBits, Collection, REST, Routes, Options } = require('discord.js');
 const { Shoukaku, Connectors } = require('shoukaku');
 const fs = require('fs');
 const path = require('path');
 
-const { players, destroyPlayer, setDiscordClient, setShoukaku, createGuildPlayer, playNext, scheduleRejoin } = require('./src/utils/playerManager');
+const { players, destroyPlayer, setDiscordClient, setShoukaku, createGuildPlayer, playNext, scheduleRejoin, applyPlayerVolume } = require('./src/utils/playerManager');
 const { getPlaybackControlError } = require('./src/utils/djCheck');
 const { getGuildSettings, getAllIs247Guilds, setGuildSettings } = require('./src/utils/config');
 const { updateMusicPanel } = require('./src/utils/musicPanel');
 const { logEvent, safeErrorMessage, shouldIgnoreError } = require('./src/utils/musicLogger');
 const { createPrivateStatusEmbedManager } = require('./src/utils/privateStatusEmbed');
+
+/** Resolve a Spotify track URL to a YouTube search query via the embed page JSON. */
+function resolveSpotifyUrl(url) {
+    const match = url.match(/spotify\.com(?:\/intl-[a-z]+)?\/track\/([A-Za-z0-9]+)/);
+    if (!match) return Promise.resolve(null);
+    const trackId = match[1];
+    const embedUrl = `https://open.spotify.com/embed/track/${trackId}`;
+    return new Promise((resolve) => {
+        const req = https.get(embedUrl, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; EselMusic-Bot/1.0)', 'Accept': 'text/html' }
+        }, (res) => {
+            let data = '';
+            res.on('data', c => { data += c; if (data.length > 200_000) { req.destroy(); resolve(null); } });
+            res.on('end', () => {
+                try {
+                    const scriptMatch = data.match(/<script[^>]*>({"props":{"pageProps":.+?})<\/script>/);
+                    if (!scriptMatch) return resolve(null);
+                    const json = JSON.parse(scriptMatch[1]);
+                    const entity = json?.props?.pageProps?.state?.data?.entity;
+                    if (!entity || entity.type !== 'track') return resolve(null);
+                    const title = (entity.name || '').trim();
+                    if (!title) return resolve(null);
+                    const artists = (entity.artists || []).map(a => a.name).filter(Boolean).join(', ');
+                    return resolve(artists ? `${title} ${artists}` : title);
+                } catch { resolve(null); }
+            });
+        });
+        req.on('error', () => resolve(null));
+        req.setTimeout(8000, () => { req.destroy(); resolve(null); });
+    });
+}
 
 // Cooldown for music-channel diagnostic warnings to avoid spam.
 const musicChannelWarnCooldown = new Map();
@@ -23,6 +55,37 @@ const client = new Client({
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
     ],
+    // Limit in-memory caches to prevent unbounded RAM growth.
+    makeCache: Options.cacheWithLimits({
+        ...Options.DefaultMakeCacheSettings,
+        MessageManager: 20,       // Only keep last 20 messages per channel
+        GuildMemberManager: {     // Only cache members the bot actively needs
+            maxSize: 200,
+            keepOverLimit: member => member.id === member.client.user?.id,
+        },
+        ReactionManager: 0,
+        ReactionUserManager: 0,
+        GuildStickerManager: 0,
+        GuildScheduledEventManager: 0,
+        PresenceManager: 0,
+        StageInstanceManager: 0,
+    }),
+    // Periodically sweep stale cached data.
+    sweepers: {
+        ...Options.DefaultSweeperSettings,
+        messages: {
+            interval: 300,   // every 5 minutes
+            lifetime: 120,   // remove messages older than 2 minutes
+        },
+        guildMembers: {
+            interval: 600,         // every 10 minutes
+            filter: () => member => member.id !== member.client.user?.id,
+        },
+        users: {
+            interval: 600,
+            filter: () => user => user.bot === false,
+        },
+    },
 });
 
 // ─── Lavalink / Shoukaku ─────────────────────────────────────────────────────
@@ -188,14 +251,31 @@ client.on('interactionCreate', async (interaction) => {
         return;
     }
 
-    if (interaction.isButton() && interaction.customId.startsWith('music:')) {
-        return interaction.reply({
-            embeds: [{
-                color: 0xFEE75C,
-                description: '⚠️ EselMusic läuft jetzt im 24/7 Music-Channel-Modus. Schreibe einfach einen Songnamen oder Link in den Musik-Channel.'
-            }],
-            flags: [64],
-        }).catch(() => { });
+    if (interaction.isButton() && interaction.customId.startsWith('panel:')) {
+        const state = players.get(interaction.guildId);
+        if (!state || !state.player) {
+            return interaction.reply({ embeds: [{ color: 0xFEE75C, description: '⚠️ Kein aktiver Player.' }], flags: [64] }).catch(() => {});
+        }
+        const action = interaction.customId.split(':')[1];
+        try {
+            if (action === 'skip') {
+                await interaction.deferUpdate();
+                if (state.loop === 'track') state.loop = 'off';
+                await state.player.stopTrack(); // triggers 'end' event → playNext fires automatically
+            } else if (action === 'vol_down' || action === 'vol_up') {
+                await interaction.deferUpdate();
+                const delta = action === 'vol_up' ? 10 : -10;
+                const newVol = Math.min(200, Math.max(0, (state.volume || 100) + delta));
+                state.volume = newVol;
+                await applyPlayerVolume(state.player, newVol);
+                setGuildSettings(interaction.guildId, { volume: newVol });
+                await updateMusicPanel(client, interaction.guildId, state);
+            }
+        } catch (err) {
+            console.error('[Panel Button]', err);
+            interaction.followUp({ embeds: [{ color: 0xED4245, description: `❌ ${err.message}` }], flags: [64] }).catch(() => {});
+        }
+        return;
     }
 
     if (!interaction.isChatInputCommand()) return;
@@ -284,7 +364,7 @@ client.on('messageCreate', async (message) => {
             return;
         }
 
-        const { createGuildPlayer, playNext } = require('./src/utils/playerManager');
+        const { createGuildPlayer, playNext, searchIdentifiers } = require('./src/utils/playerManager');
         const { formatDuration } = require('./src/utils/formatDuration');
 
         let state;
@@ -311,10 +391,38 @@ client.on('messageCreate', async (message) => {
 
         let resolved;
         try {
-            const identifiers = [`ytsearch:${query}`, `ytmsearch:${query}`];
-            for (const id of identifiers) {
-                resolved = await node.rest.resolve(id);
-                if (resolved && resolved.loadType !== 'empty' && resolved.loadType !== 'error') break;
+            const isUrl = /^https?:\/\//i.test(query);
+            const isSpotify = isUrl && /open\.spotify\.com/i.test(query);
+            if (isSpotify) {
+                const spotifyTitle = await resolveSpotifyUrl(query);
+                if (!spotifyTitle) {
+                    const warn = await message.channel.send({ embeds: [{ color: 0xFEE75C, description: '⚠️ Spotify-Link konnte nicht aufgelöst werden.' }] });
+                    setTimeout(() => warn.delete().catch(() => { }), 5000);
+                    return;
+                }
+                for (const id of searchIdentifiers(spotifyTitle)) {
+                    try {
+                        resolved = await node.rest.resolve(id);
+                    } catch (e) {
+                        console.warn(`[music] ${id.split(':')[0]} fehlgeschlagen: ${e.message}`);
+                        resolved = null;
+                        continue;
+                    }
+                    if (resolved && resolved.loadType !== 'empty' && resolved.loadType !== 'error') break;
+                }
+            } else if (isUrl) {
+                resolved = await node.rest.resolve(query);
+            } else {
+                for (const id of searchIdentifiers(query)) {
+                    try {
+                        resolved = await node.rest.resolve(id);
+                    } catch (e) {
+                        console.warn(`[music] ${id.split(':')[0]} fehlgeschlagen: ${e.message}`);
+                        resolved = null;
+                        continue;
+                    }
+                    if (resolved && resolved.loadType !== 'empty' && resolved.loadType !== 'error') break;
+                }
             }
         } catch (err) {
             const warn = await message.channel.send({ embeds: [{ color: 0xED4245, description: `❌ Suche fehlgeschlagen: ${err.message}` }] });
@@ -322,7 +430,20 @@ client.on('messageCreate', async (message) => {
             return;
         }
 
-        const track = resolved?.loadType === 'search' ? resolved.data?.[0] : null;
+        // Vorher wurde nur loadType 'search' akzeptiert — ein direkt in den
+        // Musik-Channel gepasteter Link (loadType 'track'/'playlist') lief
+        // deshalb immer in "Keine Ergebnisse", obwohl Lavalink ihn aufgelöst hat.
+        let track = null;
+        if (resolved?.loadType === 'search') {
+            track = resolved.data?.[0] || null;
+        } else if (resolved?.loadType === 'track') {
+            track = resolved.data || null;
+        } else if (resolved?.loadType === 'playlist') {
+            const tracks = resolved.data?.tracks || [];
+            track = tracks[0] || null;
+            // Rest der Playlist hinten anhängen, der erste Track kommt gleich nach vorne.
+            if (tracks.length > 1) state.queue.push(...tracks.slice(1));
+        }
         if (!track) {
             const warn = await message.channel.send({ embeds: [{ color: 0xFEE75C, description: `⚠️ Keine Ergebnisse für: **${query}**` }] });
             setTimeout(() => warn.delete().catch(() => { }), 5000);
@@ -358,6 +479,20 @@ client.on('messageCreate', async (message) => {
 client.on('voiceStateUpdate', async (oldState, newState) => {
     const botId = client.user?.id;
     if (!botId) return;
+
+    // ── Bot itself was moved to a different channel ───────────────────────────
+    if (oldState.id === botId && oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
+        const guildId = oldState.guild.id;
+        const settings = getGuildSettings(guildId);
+        if (settings.is247) {
+            // Update the stored channel so any pending rejoin targets the new channel
+            setGuildSettings(guildId, { voiceChannelId: newState.channelId });
+        }
+        // Also update in-memory state so the player knows where it is
+        const state = players.get(guildId);
+        if (state) state.voiceChannelId = newState.channelId;
+        return;
+    }
 
     // ── Bot itself was disconnected/kicked ────────────────────────────────────
     if (oldState.id === botId && oldState.channelId && !newState.channelId) {
@@ -415,6 +550,42 @@ function apiAuth(req, res, next) {
 }
 
 app.get('/health', (req, res) => res.json({ status: 'ok', service: 'musikbot', uptime: process.uptime() }));
+
+// ── GET /api/public-stats — no auth, safe aggregate data only ─────────────────
+app.get('/api/public-stats', (req, res) => {
+    const { db } = require('./src/utils/database');
+    const totalPlays = db.prepare('SELECT COALESCE(SUM(play_count), 0) AS total FROM song_stats').get().total;
+    const uniqueTracks = db.prepare('SELECT COUNT(*) AS count FROM song_stats').get().count;
+    res.json({
+        totalPlays: Number(totalPlays),
+        uniqueTracks: Number(uniqueTracks),
+        activePlayers: players.size,
+    });
+});
+
+// ── GET /api/public-now-playing — no auth, returns anonymised now-playing list ─
+app.get('/api/public-now-playing', (req, res) => {
+    const tracks = [];
+    for (const [, state] of players) {
+        if (state.current) {
+            tracks.push({
+                title:  state.current.info.title  || 'Unknown',
+                author: state.current.info.author || 'Unknown',
+                isStream: Boolean(state.current.info.isStream),
+            });
+        }
+    }
+    res.json({ tracks });
+});
+
+// ── GET /api/public-charts — no auth, global top 10 songs by play_count ───────
+app.get('/api/public-charts', (req, res) => {
+    const { db } = require('./src/utils/database');
+    const rows = db.prepare(
+        'SELECT title, author, SUM(play_count) AS plays FROM song_stats GROUP BY title, author ORDER BY plays DESC LIMIT 10'
+    ).all();
+    res.json({ charts: rows.map((r, i) => ({ rank: i + 1, title: r.title, author: r.author, plays: Number(r.plays) })) });
+});
 
 // ── GET /api/status ───────────────────────────────────────────────────────────
 app.get('/api/status', apiAuth, (req, res) => {
