@@ -16,6 +16,15 @@ const { getGuildSettings } = require('./config');
 
 const IGNORED_DISCORD_CODES = new Set([10062, 40060]);
 
+// Ein pro Guild konfigurierter Log-Kanal, der geloescht wurde, bleibt sonst
+// dauerhaft in der guild_settings-Tabelle stehen und wird bei jedem Event
+// (jedes mit eigenem Cooldown) erneut erfolglos abgefragt - das summiert sich
+// ueber mehrere Event-Typen zu wiederholten Warnungen fuer denselben toten
+// Kanal. Nicht die Einstellung selbst anfassen (das entscheidet der
+// Server-Owner), nur unnoetige Wiederholversuche vermeiden.
+const UNREACHABLE_CHANNEL_RETRY_MS = 30 * 60_000;
+const unreachableChannels = new Map(); // channelId -> retryAfter timestamp
+
 const EVENT_COLORS = {
     info:     0x5865F2, // blurple
     warn:     0xFEE75C, // yellow
@@ -164,15 +173,23 @@ async function logEvent(client, guildId, event, fields = {}) {
 
     if (!logChannelId) return;
 
+    const retryAfter = unreachableChannels.get(logChannelId);
+    if (retryAfter && Date.now() < retryAfter) return; // kuerzlich schon fehlgeschlagen
+
     let channel;
     try {
         channel = await client.channels.fetch(logChannelId);
     } catch (err) {
         if (!shouldIgnoreError(err)) {
-            console.warn(`[MusicLogger] Cannot fetch log channel ${logChannelId} for guild ${effectiveGuildId}: ${safeErrorMessage(err)}`);
+            const wasAlreadyKnownBad = Boolean(retryAfter);
+            unreachableChannels.set(logChannelId, Date.now() + UNREACHABLE_CHANNEL_RETRY_MS);
+            if (!wasAlreadyKnownBad) {
+                console.warn(`[MusicLogger] Cannot fetch log channel ${logChannelId} for guild ${effectiveGuildId}: ${safeErrorMessage(err)} - pausiere Versuche fuer 30 Minuten.`);
+            }
         }
         return;
     }
+    unreachableChannels.delete(logChannelId);
     if (!channel?.isTextBased()) return;
 
     // ── Build embed ─────────────────────────────────────────────────────────
