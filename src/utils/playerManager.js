@@ -824,13 +824,22 @@ async function createGuildPlayer({ guildId, voiceChannelId, shardId, textChannel
 
     player.on('exception', async (error) => {
         if (!players.has(guildId)) return;
-        console.error(`[PLAYER_003] Exception in guild ${guildId}:`, error?.message || error);
+        const failedTitle = state.current?.info?.title || 'Unbekannt';
 
         if (isYoutubeTrack(state.current)) noteYoutubeFailure();
 
         const recovered = await tryRecoverTrack(guildId, state, shoukaku);
-        if (recovered) return;
+        if (recovered) {
+            // Wechsel auf eine Alternativquelle laeuft noch - noch nicht
+            // endgueltig gescheitert. Frueher wurde hier schon geloggt, obwohl
+            // der naechste Versuch oft klappt - das erzeugte bis zu 3 Log-
+            // Eintraege (YouTube, SoundCloud-Alternative, letzter Rueckfall)
+            // fuer ein und denselben Songwechsel. Scheitert auch die
+            // Alternative, feuert dieser Handler erneut und landet dann unten.
+            return;
+        }
 
+        console.error(`[PLAYER_003] "${failedTitle}" konnte auf keiner Quelle abgespielt werden (Guild ${guildId}):`, error?.message || error);
         noteSkippedTrack(guildId);
         await playNext(guildId);
     });
