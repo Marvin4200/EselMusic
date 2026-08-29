@@ -153,6 +153,15 @@ function createPrivateStatusEmbedManager({ client, shoukaku, players }) {
     let cachedGuildId = null;
     let cachedChannelId = null;
 
+    // Wenn Guild/Kanal nicht erreichbar sind (z.B. geloeschter Kanal), nicht
+    // bei jedem Update (bis zu mehrmals pro Minute, ueber requestUpdate() bei
+    // jedem Songwechsel) erneut gegen die Discord-API laufen und erneut warnen -
+    // das erzeugte reine Dauerwarnungen ohne neuen Erkenntniswert. Stattdessen
+    // fuer ein Zeitfenster merken, dass es zuletzt nicht ging.
+    const UNREACHABLE_RETRY_MS = 30 * 60_000;
+    let unreachableUntil = 0;
+    let unreachableReason = null;
+
     async function resolveTargetChannel() {
         const { guildId, channelId } = resolveTargetIds();
         cachedGuildId = guildId;
@@ -163,11 +172,17 @@ function createPrivateStatusEmbedManager({ client, shoukaku, players }) {
             return null;
         }
 
+        if (Date.now() < unreachableUntil) return null; // kuerzlich schon fehlgeschlagen, kein erneuter Versuch
+
         let guild;
         try {
             guild = await client.guilds.fetch(guildId);
         } catch (err) {
-            console.warn(`[PrivateStatus] Cannot access fixed guild ${guildId}: ${err?.message || err}`);
+            unreachableUntil = Date.now() + UNREACHABLE_RETRY_MS;
+            if (unreachableReason !== 'guild') {
+                unreachableReason = 'guild';
+                console.warn(`[PrivateStatus] Cannot access fixed guild ${guildId}: ${err?.message || err} - pausiere Versuche fuer 30 Minuten.`);
+            }
             return null;
         }
 
@@ -175,9 +190,14 @@ function createPrivateStatusEmbedManager({ client, shoukaku, players }) {
         try {
             channel = await guild.channels.fetch(channelId);
         } catch (err) {
-            console.warn(`[PrivateStatus] Cannot access fixed channel ${channelId}: ${err?.message || err}`);
+            unreachableUntil = Date.now() + UNREACHABLE_RETRY_MS;
+            if (unreachableReason !== 'channel') {
+                unreachableReason = 'channel';
+                console.warn(`[PrivateStatus] Cannot access fixed channel ${channelId}: ${err?.message || err} - pausiere Versuche fuer 30 Minuten.`);
+            }
             return null;
         }
+        unreachableReason = null;
 
         if (!channel?.isTextBased?.()) {
             console.warn(`[PrivateStatus] Fixed channel ${channelId} is not text-based.`);
