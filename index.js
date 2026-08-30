@@ -672,7 +672,26 @@ function apiAuth(req, res, next) {
     next();
 }
 
-app.get('/health', (req, res) => res.json({ status: 'ok', service: 'musikbot', uptime: process.uptime() }));
+// Meldet ausdruecklich auch den Zustand der Discord-Verbindung.
+// Vorher stand hier nur "ok", solange der HTTP-Server antwortete - ein Bot mit
+// abgerissener Gateway-Verbindung galt damit als gesund, obwohl er fuer alle
+// Nutzer offline war. Genau das blieb am 30.08. stundenlang unbemerkt.
+// Der Statuscode bleibt bewusst 200: die Docker-Pruefung soll weiterhin nur
+// sagen "Prozess laeuft". Ob Discord haengt, wertet der Waechter separat aus.
+app.get('/health', (req, res) => {
+    const discordBereit = client.isReady?.() === true && client.ws?.status === 0;
+    res.json({
+        status: 'ok',
+        service: 'musikbot',
+        uptime: process.uptime(),
+        discord: {
+            bereit: discordBereit,
+            wsStatus: client.ws?.status ?? null,
+            pingMs: client.ws?.ping ?? null,
+            guilds: client.guilds?.cache?.size ?? 0,
+        },
+    });
+});
 
 // ── GET /api/public-stats — no auth, safe aggregate data only ─────────────────
 app.get('/api/public-stats', (req, res) => {
