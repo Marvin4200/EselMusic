@@ -256,6 +256,91 @@ function scheduleRejoin(guildId, delayMs = 10_000, attempt = 1) {
     rejoinTimeouts.set(guildId, t);
 }
 
+/**
+ * Raeumt auf, wenn ein kompletter Lavalink-Node ausgefallen ist.
+ *
+ * Hintergrund: die 'closed'-Events der einzelnen Player werden ueber den
+ * Websocket genau des Nodes zugestellt, der gerade gestorben ist - sie treffen
+ * also nie ein. Ohne dieses Aufraeumen bleiben tote Player-Objekte in der Map
+ * stehen, scheduleRejoin haelt sie wegen players.has() faelschlich fuer gesund
+ * und ueberspringt den Neuaufbau. Ergebnis: 24/7-Gilden blieben dauerhaft stumm,
+ * ohne dass irgendwo ein Fehler sichtbar wird.
+ *
+ * @param {string} nodeName Name des ausgefallenen Nodes
+ * @returns {number} Anzahl der betroffenen Gilden
+ */
+function recoverAfterNodeLoss(nodeName) {
+    const betroffen = [];
+    for (const [guildId, state] of players) {
+        if (state?.player?.node?.name === nodeName) betroffen.push(guildId);
+    }
+    if (betroffen.length === 0) return 0;
+
+    console.warn(`[NODE] Node "${nodeName}" ausgefallen - ${betroffen.length} Wiedergabe(n) betroffen, baue neu auf`);
+    for (const guildId of betroffen) {
+        clearSkipNotice(guildId);
+        clearAutomixRetry(guildId);
+        clearRejoinStability(guildId);
+        players.delete(guildId);
+
+        const settings = getGuildSettings(guildId);
+        if (settings?.is247 && settings?.voiceChannelId) {
+            // Kurz warten, damit Shoukaku den verbliebenen Node als "ideal"
+            // fuehrt, bevor createGuildPlayer einen neuen Player anfordert.
+            scheduleRejoin(guildId, 5_000, 1);
+        }
+    }
+    return betroffen.length;
+}
+
+/**
+ * Regelmaessige Selbstkontrolle des Audio-Systems.
+ *
+ * Hintergrund: auf Shoukakus Ereignisse ist beim Node-Ausfall kein Verlass.
+ * Das 'disconnect'-Ereignis eines Nodes wird vom Manager gar nicht nach aussen
+ * weitergereicht, und die 'closed'-Events der Player kaemen ueber genau den
+ * Websocket, der gerade gestorben ist. Faellt ein Node weg, bleiben deshalb tote
+ * Player-Objekte in der Map stehen; scheduleRejoin haelt sie wegen players.has()
+ * faelschlich fuer gesund und 24/7-Gilden bleiben dauerhaft stumm, ohne dass
+ * irgendwo ein Fehler auftaucht.
+ *
+ * Eine schlichte Kontrolle im Minutentakt ist hier robuster als jede
+ * Ereignisverdrahtung: sie erkennt den Zustand, egal wie er entstanden ist.
+ *
+ * @param {Set<string>} lebendeNodes Namen der aktuell angemeldeten Lavalink-Nodes
+ */
+function healthCheck(lebendeNodes) {
+    let aufgeraeumt = 0;
+    for (const [guildId, state] of [...players]) {
+        const nodeName = state?.player?.node?.name;
+        // Solange der Node noch im Pool steht, ist ein kurzer Verbindungsabriss
+        // normal - erst wenn er ganz verschwunden ist, ist der Player wertlos.
+        if (nodeName && lebendeNodes.has(nodeName)) continue;
+        clearSkipNotice(guildId);
+        clearAutomixRetry(guildId);
+        clearRejoinStability(guildId);
+        players.delete(guildId);
+        aufgeraeumt++;
+    }
+
+    let neuverbunden = 0;
+    if (_client) {
+        for (const [guildId] of _client.guilds.cache) {
+            if (players.has(guildId)) continue;
+            if (rejoinTimeouts.has(guildId)) continue; // Neuaufbau laeuft bereits
+            const settings = getGuildSettings(guildId);
+            if (!settings?.is247 || !settings?.voiceChannelId) continue;
+            scheduleRejoin(guildId, 2_000, 1);
+            neuverbunden++;
+        }
+    }
+
+    if (aufgeraeumt || neuverbunden) {
+        console.warn(`[NODE] Selbstkontrolle: ${aufgeraeumt} verwaiste Wiedergabe(n) entfernt, ${neuverbunden} Gilde(n) werden neu verbunden`);
+    }
+    return { aufgeraeumt, neuverbunden };
+}
+
 function scheduleAutomixRetry(guildId) {
     clearAutomixRetry(guildId);
     const timeout = setTimeout(() => {
@@ -931,6 +1016,8 @@ module.exports = {
     playNext,
     destroyPlayer,
     scheduleRejoin,
+    recoverAfterNodeLoss,
+    healthCheck,
     triggerPanelUpdate,
     applyPlayerVolume,
     setDiscordClient,

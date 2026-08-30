@@ -6,7 +6,7 @@ const { Shoukaku, Connectors } = require('shoukaku');
 const fs = require('fs');
 const path = require('path');
 
-const { players, destroyPlayer, setDiscordClient, setShoukaku, createGuildPlayer, playNext, scheduleRejoin, applyPlayerVolume } = require('./src/utils/playerManager');
+const { players, destroyPlayer, setDiscordClient, setShoukaku, createGuildPlayer, playNext, scheduleRejoin, applyPlayerVolume, recoverAfterNodeLoss, healthCheck } = require('./src/utils/playerManager');
 const { getPlaybackControlError } = require('./src/utils/djCheck');
 const { getGuildSettings, getAllIs247Guilds, setGuildSettings } = require('./src/utils/config');
 const { updateMusicPanel } = require('./src/utils/musicPanel');
@@ -171,10 +171,29 @@ const lavalinkNodes = [{
     auth: process.env.LAVALINK_PASSWORD || 'youshallnotpass',
 }];
 
+// Zweiter Audio-Node (laeuft auf dem Raspberry Pi). Springt ein, wenn der
+// Haupt-Node abstuerzt oder unter Speicherdruck nicht mehr antwortet - genau
+// das Szenario, das den Bot am 30.08. stumm gemacht hat. Nur aktiv, wenn
+// LAVALINK_FALLBACK_HOST gesetzt ist; fehlt die Variable, aendert sich nichts.
+if (process.env.LAVALINK_FALLBACK_HOST) {
+    lavalinkNodes.push({
+        name: 'fallback',
+        url: process.env.LAVALINK_FALLBACK_HOST,
+        auth: process.env.LAVALINK_FALLBACK_PASSWORD || process.env.LAVALINK_PASSWORD || 'youshallnotpass',
+    });
+}
+
 const shoukaku = new Shoukaku(new Connectors.DiscordJS(client), lavalinkNodes, {
     reconnectTries: 5,
-    reconnectInterval: 5000,
+    // Achtung: Shoukaku rechnet diesen Wert intern mal 1000 - die Angabe ist also
+    // in SEKUNDEN, nicht Millisekunden. Hier stand vorher 5000, was 5000 Sekunden
+    // (83 Minuten) Wartezeit zwischen zwei Versuchen bedeutete: fiel ein Node aus,
+    // verband sich der Bot praktisch nie wieder und blieb stumm.
+    reconnectInterval: 5,
     resume: true,
+    // Zieht laufende Wiedergaben auf einen anderen Node um, wenn der aktuelle
+    // wegbricht - ohne das wuerde die Musik beim Ausfall einfach verstummen.
+    moveOnDisconnect: true,
 });
 
 const privateStatus = createPrivateStatusEmbedManager({
@@ -210,16 +229,46 @@ shoukaku.on('close', (name, code, reason) => {
         }).catch(() => { });
     }
 });
-shoukaku.on('disconnect', (name, moved) => {
-    if (moved) return;
-    console.warn(`⚠️ Lavalink node "${name}" disconnected`);
-    privateStatus.requestUpdate();
-    for (const [guildId] of client.guilds.cache) {
-        logEvent(client, guildId, 'lavalink_disconnected', {
-            description: `Lavalink Node "${name}" verbindung verloren.`,
-        }).catch(() => { });
+// ─── Selbstheilung des Audio-Systems ──────────────────────────────────────────
+// Auf Shoukakus Ereignisse ist beim Node-Ausfall kein Verlass:
+//   - 'disconnect' eines Nodes wird vom Manager nicht nach aussen weitergereicht
+//     (addNode leitet nur debug/reconnecting/error/close/ready/raw durch), ein
+//     `shoukaku.on('disconnect', ...)` lief also immer ins Leere.
+//   - Nach erschoepften Verbindungsversuchen entfernt Shoukaku den Node
+//     endgueltig aus dem Pool. Er kam selbst dann nicht zurueck, wenn der
+//     Lavalink-Server laengst wieder lief - die Musik blieb bis zum Bot-Neustart
+//     weg. Genau dieses Muster hat den Bot am 30.08. stumm gemacht.
+//
+// Statt weiter an der Ereignis-Kette zu haengen, wird der Zustand hier schlicht
+// regelmaessig geprueft und wo noetig repariert. Das erkennt jede Stoerung,
+// unabhaengig davon, ob Shoukaku sie gemeldet hat.
+const NODE_KONTROLLE_MS = 30_000;
+
+setInterval(() => {
+    try {
+        // Als brauchbar gilt nur ein Node, der wirklich verbunden ist - Shoukakus
+        // eigene Node-Auswahl (getIdealNode) filtert genauso. Ein Player auf einem
+        // nicht verbundenen Node kann keinen Ton liefern und ist damit wertlos.
+        const verbundeneNodes = new Set();
+        for (const [name, node] of shoukaku.nodes) {
+            if (node.state === 1 /* CONNECTED */) verbundeneNodes.add(name);
+        }
+
+        // Reihenfolge ist wichtig: erst pruefen, dann fehlende Nodes wieder
+        // anmelden. Andersherum stuende der gerade neu angemeldete (und noch gar
+        // nicht verbundene) Node bereits wieder im Pool, und seine verwaisten
+        // Player wuerden faelschlich als gesund durchgewunken.
+        healthCheck(verbundeneNodes);
+
+        for (const optionen of lavalinkNodes) {
+            if (shoukaku.nodes.has(optionen.name)) continue;
+            console.warn(`[NODE] "${optionen.name}" ist aus dem Pool verschwunden - melde erneut an`);
+            shoukaku.addNode(optionen);
+        }
+    } catch (err) {
+        console.error('[NODE] Selbstkontrolle fehlgeschlagen:', err?.message || err);
     }
-});
+}, NODE_KONTROLLE_MS);
 
 // ─── Load Commands ────────────────────────────────────────────────────────────
 client.commands = new Collection();
@@ -684,8 +733,8 @@ app.get('/api/public-artists', (req, res) => {
 
 // ── GET /api/status ───────────────────────────────────────────────────────────
 app.get('/api/status', apiAuth, (req, res) => {
-    const lavalinkNode = shoukaku.nodes?.get('main');
-    const lavalinkConnected = lavalinkNode?.state === 1 /* Connected */ || lavalinkNode?.state === 'connected';
+    const isConnected = (n) => n?.state === 1 /* Connected */ || n?.state === 'connected';
+    const lavalinkConnected = [...(shoukaku.nodes?.values() || [])].some(isConnected);
 
     res.json({
         success: true,
