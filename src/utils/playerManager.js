@@ -341,6 +341,62 @@ function healthCheck(lebendeNodes) {
     return { aufgeraeumt, neuverbunden };
 }
 
+// ── Sperrliste fuer nicht abspielbare Titel ──────────────────────────────────
+// YouTube verlangt fuer manche Videos eine Anmeldung ("This video requires
+// login"). Diese Titel scheitern zuverlaessig auf jeder Quelle - der Bot hat
+// sie trotzdem bei jedem Durchlauf erneut versucht, was allein am 30.08. rund
+// 460 Fehlschlaege ergab. Jetzt werden sie gemerkt und uebersprungen.
+//
+// Die Sperre laeuft nach einer Woche ab: YouTube nimmt solche Beschraenkungen
+// durchaus wieder zurueck, und ein Titel soll nicht fuer immer verloren sein.
+const SPERRE_GUELTIG_TAGE = 7;
+
+function trackSchluessel(info) {
+    if (!info) return null;
+    return info.identifier || info.uri || (info.title ? `${info.title}|${info.author || ''}` : null);
+}
+
+function istGesperrt(info) {
+    const schluessel = trackSchluessel(info);
+    if (!schluessel) return false;
+    try {
+        const { db } = require('./database');
+        const grenze = new Date(Date.now() - SPERRE_GUELTIG_TAGE * 86400000).toISOString();
+        return Boolean(db
+            .prepare('SELECT 1 FROM blocked_tracks WHERE identifier = ? AND blocked_at > ?')
+            .get(schluessel, grenze));
+    } catch {
+        // Ist die Datenbank nicht erreichbar, lieber abspielen als blockieren.
+        return false;
+    }
+}
+
+function titelSperren(info, grund) {
+    const schluessel = trackSchluessel(info);
+    if (!schluessel) return;
+    try {
+        const { db } = require('./database');
+        db.prepare(`
+            INSERT INTO blocked_tracks (identifier, uri, title, author, reason, blocked_at, attempts)
+            VALUES (?, ?, ?, ?, ?, ?, 1)
+            ON CONFLICT(identifier) DO UPDATE SET
+                blocked_at = excluded.blocked_at,
+                reason     = excluded.reason,
+                attempts   = attempts + 1
+        `).run(
+            schluessel,
+            info.uri || null,
+            info.title || null,
+            info.author || null,
+            String(grund || '').slice(0, 200),
+            new Date().toISOString()
+        );
+        console.warn(`[SPERRE] "${info.title || schluessel}" wird vorerst uebersprungen: ${grund}`);
+    } catch (err) {
+        console.warn('[SPERRE] konnte nicht gespeichert werden:', err?.message || err);
+    }
+}
+
 function scheduleAutomixRetry(guildId) {
     clearAutomixRetry(guildId);
     const timeout = setTimeout(() => {
@@ -758,11 +814,29 @@ async function playNext(guildId, { silent = false } = {}) {
 
     if (state.loop === 'track' && state.current) {
         next = state.current;
+        // Auch ein Titel in Dauerschleife wird uebersprungen, wenn er gesperrt
+        // ist - sonst haengt die Wiedergabe endlos an einem toten Titel fest.
+        if (istGesperrt(next.info)) {
+            console.log(`[SPERRE] Schleifentitel "${next.info?.title}" ist gesperrt, gehe zur Warteschlange`);
+            state.current = null;
+            next = state.queue.shift() || null;
+        }
     } else {
         if (state.loop === 'queue' && state.current) {
             state.queue.push(state.current);
         }
         next = state.queue.shift() || null;
+    }
+
+    // Gesperrte Titel gar nicht erst anspielen. Die Obergrenze verhindert, dass
+    // eine komplett gesperrte Warteschlange den Ablauf blockiert.
+    let uebersprungen = 0;
+    while (next && istGesperrt(next.info) && uebersprungen < 50) {
+        uebersprungen++;
+        next = state.queue.shift() || null;
+    }
+    if (uebersprungen > 0) {
+        console.log(`[SPERRE] ${uebersprungen} gesperrte(n) Titel in Guild ${guildId} uebersprungen`);
     }
 
     if (!next) {
@@ -927,6 +1001,8 @@ async function createGuildPlayer({ guildId, voiceChannelId, shardId, textChannel
     player.on('exception', async (error) => {
         if (!players.has(guildId)) return;
         const failedTitle = state.current?.info?.title || 'Unbekannt';
+        // Info festhalten, bevor ein Wiederherstellungsversuch state.current ersetzt
+        const fehlgeschlagenInfo = state.current?.info || null;
 
         if (isYoutubeTrack(state.current)) noteYoutubeFailure();
 
@@ -941,6 +1017,13 @@ async function createGuildPlayer({ guildId, voiceChannelId, shardId, textChannel
             return;
         }
 
+        // Verlangt YouTube eine Anmeldung, ist der Titel dauerhaft nicht
+        // erreichbar - dann merken wir ihn uns, statt ihn beim naechsten
+        // Durchlauf erneut zu versuchen.
+        const fehlertext = JSON.stringify(error || '');
+        if (/requires login|Sign in to confirm|LOGIN_REQUIRED/i.test(fehlertext)) {
+            titelSperren(fehlgeschlagenInfo, 'YouTube verlangt Anmeldung');
+        }
         console.error(`[PLAYER_003] "${failedTitle}" konnte auf keiner Quelle abgespielt werden (Guild ${guildId}):`, error?.message || error);
         noteSkippedTrack(guildId);
         await playNext(guildId);

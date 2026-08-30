@@ -67,4 +67,20 @@ for (const col of [
     try { db.exec(col); } catch { /* already exists */ }
 }
 
+// Titel, die sich dauerhaft nicht abspielen lassen (praktisch immer, weil
+// YouTube fuer sie eine Anmeldung verlangt). Ohne diese Liste versucht der Bot
+// bei jedem Durchlauf aufs Neue dieselben Titel und scheitert wieder.
+db.exec(`
+CREATE TABLE IF NOT EXISTS blocked_tracks (
+    identifier TEXT PRIMARY KEY,
+    uri        TEXT,
+    title      TEXT,
+    author     TEXT,
+    reason     TEXT,
+    blocked_at TEXT NOT NULL,
+    attempts   INTEGER DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_blocked_at ON blocked_tracks(blocked_at);
+`);
+
 module.exports = { db, DB_PATH };
