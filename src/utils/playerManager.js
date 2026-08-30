@@ -22,6 +22,7 @@ const rejoinTimeouts = new Map();
 const replacingGuilds = new Set();
 /** @type {Map<string, number>} guildId → consecutive failed rejoin attempts */
 const rejoinFailCounts = new Map();
+const softCapWarned = new Set(); // welche Gilden bereits einmal ueber den Soft-Cap-Zustand informiert wurden
 /** @type {Map<string, NodeJS.Timeout>} guildId → timer to reset reconnect-failure counter after stable voice connection */
 const rejoinStabilityTimers = new Map();
 /** Stop retrying rejoin after this many consecutive failures and clear 24/7 state */
@@ -152,6 +153,7 @@ function armRejoinStabilityReset(guildId) {
         // Reset only if the player is still alive (connection did not flap again).
         if (players.has(guildId)) {
             rejoinFailCounts.delete(guildId);
+            softCapWarned.delete(guildId);
             console.log(`[247] Voice connection stabilized in guild ${guildId}; reconnect counter reset.`);
         }
     }, REJOIN_STABLE_RESET_MS);
@@ -167,13 +169,20 @@ function scheduleRejoin(guildId, delayMs = 10_000, attempt = 1) {
     clearRejoin(guildId);
 
     if (attempt > MAX_REJOIN_ATTEMPTS) {
-        // Never disable 24/7 — reset counter and keep retrying at 60s intervals
-        console.warn(`[247] Soft cap (${MAX_REJOIN_ATTEMPTS}) reached for guild ${guildId}. Resetting counter, retrying at 60s intervals.`);
-        if (_client) {
-            logEvent(_client, guildId, 'rejoin_disabled', {
-                reason: `Soft cap (${MAX_REJOIN_ATTEMPTS} Versuche) erreicht. Neuer Versuch in 60s.`,
-                is247: true,
-            }).catch(() => { });
+        // Never disable 24/7 — reset counter and keep retrying at 60s intervals.
+        // Nur beim ERSTEN Erreichen pro Ausfall-Episode als WARNING loggen - bei einem
+        // laengeren Ausfall wuerde das sonst alle ~5 Minuten dieselbe Meldung erzeugen.
+        if (!softCapWarned.has(guildId)) {
+            softCapWarned.add(guildId);
+            console.warn(`[247] Soft cap (${MAX_REJOIN_ATTEMPTS}) reached for guild ${guildId}. Resetting counter, retrying at 60s intervals.`);
+            if (_client) {
+                logEvent(_client, guildId, 'rejoin_disabled', {
+                    reason: `Soft cap (${MAX_REJOIN_ATTEMPTS} Versuche) erreicht. Neuer Versuch in 60s.`,
+                    is247: true,
+                }).catch(() => { });
+            }
+        } else {
+            console.log(`[247] Soft cap (${MAX_REJOIN_ATTEMPTS}) reached again for guild ${guildId}. Retrying at 60s intervals.`);
         }
         rejoinFailCounts.set(guildId, 0);
         scheduleRejoin(guildId, 60_000, 1);
@@ -199,6 +208,7 @@ function scheduleRejoin(guildId, delayMs = 10_000, attempt = 1) {
         if (!settings.is247 || !settings.voiceChannelId) {
             clearRejoinStability(guildId);
             rejoinFailCounts.delete(guildId);
+            softCapWarned.delete(guildId);
             return;
         }
 
@@ -225,7 +235,14 @@ function scheduleRejoin(guildId, delayMs = 10_000, attempt = 1) {
             console.log(`[247] Rejoined voice channel in guild ${guildId} after ${attempt} attempt(s)`);
         } catch (err) {
             rejoinFailCounts.set(guildId, attempt);
-            console.warn(`[247] Rejoin attempt ${attempt}/${MAX_REJOIN_ATTEMPTS} failed for guild ${guildId}: ${err.message}`);
+            // Nur den ersten Fehlschlag pro Ausfall-Episode als WARNING loggen (geht ins
+            // Admin-Dashboard) - Versuche 2..N sind bei einem laengeren Ausfall reine
+            // Wiederholung derselben Information und wuerden das Dashboard fluten.
+            if (attempt === 1) {
+                console.warn(`[247] Rejoin attempt ${attempt}/${MAX_REJOIN_ATTEMPTS} failed for guild ${guildId}: ${err.message}`);
+            } else {
+                console.log(`[247] Rejoin attempt ${attempt}/${MAX_REJOIN_ATTEMPTS} failed for guild ${guildId}: ${err.message}`);
+            }
             // Only log to Discord on the last attempt before soft-cap to avoid spam
             if (attempt === MAX_REJOIN_ATTEMPTS && _client) {
                 logEvent(_client, guildId, 'rejoin_failed', {
@@ -890,6 +907,7 @@ function destroyPlayer(guildId, shoukaku) {
     clearRejoin(guildId);
     clearRejoinStability(guildId);
     rejoinFailCounts.delete(guildId);
+            softCapWarned.delete(guildId);
     recentlyPlayedUris.delete(guildId);
     recentlyPlayedAuthors.delete(guildId);
     try {
