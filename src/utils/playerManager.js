@@ -341,6 +341,23 @@ function healthCheck(lebendeNodes) {
     return { aufgeraeumt, neuverbunden };
 }
 
+// Lavalink liefert den betroffenen Titel im Fehlerereignis mit. Das ist die
+// zuverlaessigere Quelle als state.current: bis der Fehler ankommt, hat ein
+// Wiederherstellungsversuch den aktuellen Titel oft schon geleert - dann stand
+// im Protokoll nur "Unbekannt" und die Sperre griff nicht.
+function spurInfoAusEreignis(ereignis) {
+    return ereignis?.track?.info || ereignis?.exception?.track?.info || null;
+}
+
+// Aus der Fehlermeldung nur die erste Zeile behalten. Das vollstaendige
+// Ereignis enthaelt drei Java-Stacktraces und blaeht jede Protokollzeile auf
+// mehrere Kilobyte auf, ohne mehr auszusagen.
+function fehlerKurz(ereignis) {
+    const text = ereignis?.exception?.message || ereignis?.message || '';
+    const erste = String(text).split('\n')[0].trim();
+    return erste || 'unbekannter Fehler';
+}
+
 // ── Sperrliste fuer nicht abspielbare Titel ──────────────────────────────────
 // YouTube verlangt fuer manche Videos eine Anmeldung ("This video requires
 // login"). Diese Titel scheitern zuverlaessig auf jeder Quelle - der Bot hat
@@ -1000,9 +1017,10 @@ async function createGuildPlayer({ guildId, voiceChannelId, shardId, textChannel
 
     player.on('exception', async (error) => {
         if (!players.has(guildId)) return;
-        const failedTitle = state.current?.info?.title || 'Unbekannt';
-        // Info festhalten, bevor ein Wiederherstellungsversuch state.current ersetzt
-        const fehlgeschlagenInfo = state.current?.info || null;
+        // Erst das Ereignis fragen, dann den Spielerzustand: das Ereignis ist
+        // auch dann noch vollstaendig, wenn state.current bereits geleert wurde.
+        const fehlgeschlagenInfo = spurInfoAusEreignis(error) || state.current?.info || null;
+        const failedTitle = fehlgeschlagenInfo?.title || 'Unbekannt';
 
         if (isYoutubeTrack(state.current)) noteYoutubeFailure();
 
@@ -1024,7 +1042,7 @@ async function createGuildPlayer({ guildId, voiceChannelId, shardId, textChannel
         if (/requires login|Sign in to confirm|LOGIN_REQUIRED/i.test(fehlertext)) {
             titelSperren(fehlgeschlagenInfo, 'YouTube verlangt Anmeldung');
         }
-        console.error(`[PLAYER_003] "${failedTitle}" konnte auf keiner Quelle abgespielt werden (Guild ${guildId}):`, error?.message || error);
+        console.error(`[PLAYER_003] "${failedTitle}" konnte auf keiner Quelle abgespielt werden (Guild ${guildId}): ${fehlerKurz(error)}`);
         noteSkippedTrack(guildId);
         await playNext(guildId);
     });
