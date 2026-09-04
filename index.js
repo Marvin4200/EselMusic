@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const https = require('https');
-const { Client, GatewayIntentBits, Collection, REST, Routes, Options } = require('discord.js');
+const { Client, GatewayIntentBits, Collection, REST, Routes, Options, ActivityType } = require('discord.js');
 const { Shoukaku, Connectors } = require('shoukaku');
 const fs = require('fs');
 const path = require('path');
@@ -290,9 +290,25 @@ for (const file of commandFiles) {
 }
 
 // ─── Events ───────────────────────────────────────────────────────────────────
+function updatePresence() {
+    try {
+        const statuses = [
+            { name: `Musik auf ${client.guilds.cache.size} Servern`, type: ActivityType.Playing },
+            { name: '/play zum Start', type: ActivityType.Listening },
+            { name: '24/7 Modus verfuegbar', type: ActivityType.Watching },
+        ];
+        const randomStatus = statuses[Math.floor(Math.random() * statuses.length)];
+        client.user.setPresence({ activities: [randomStatus], status: 'online' });
+    } catch (err) {
+        console.error('Error updating presence:', err.message);
+    }
+}
+
 client.once('clientReady', async () => {
     console.log(`✅ Logged in as ${client.user.username}`);
     setDiscordClient(client);
+    updatePresence();
+    setInterval(updatePresence, 10 * 60 * 1000);
     setShoukaku(shoukaku);
     privateStatus.start();
 
